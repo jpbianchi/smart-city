@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 import reflex as rx
 
 from citypulse import charts
-from citypulse.data import eaqi_band, load_snapshot
+from citypulse.data import eaqi_band, load_market, load_snapshot
 
 PAGE_BG = "#f9f9f7"
 CARD_BG = "#fcfcfb"
@@ -48,6 +48,20 @@ class State(rx.State):
     entity_title: str = ""
     entity_rows: list[list] = []
     entity_links: list[str] = []
+
+    # valuation page
+    fig_market: go.Figure = go.Figure()
+    fig_market_trend: go.Figure = go.Figure()
+    val_zone: str = "Montmartre"
+    val_type: str = "Appartement"
+    val_surface: str = "62"
+    val_rooms: str = "3"
+    val_estimate: str = ""
+    val_price_m2: str = ""
+    val_model_info: str = ""
+    val_features: str = ""
+    val_breakdown: list[list] = []
+    val_error: str = ""
 
     def _snapshot(self):
         return load_snapshot()
@@ -112,6 +126,73 @@ class State(rx.State):
         ]
         self.fig_zone_history = charts.build_zone_history(snap["zone_hourly"], slug, name)
 
+    def load_valuation(self):
+        self.load()
+        mk = load_market()
+        center = {"lat": 48.8566, "lon": 2.3522}
+        self.fig_market = charts.build_market_map(mk["latest"], center)
+        self.select_val_zone(self.val_zone)
+
+    def select_val_zone(self, name: str):
+        self.val_zone = name
+        mk = load_market()
+        slug = next((s for s, z in mk["zone_meta"].items() if z["name"] == name), None)
+        if slug:
+            self.fig_market_trend = charts.build_market_trend(
+                mk["market"], slug, name, self.val_type
+            )
+
+    def set_val_type(self, value: str):
+        self.val_type = value
+        self.select_val_zone(self.val_zone)
+
+    def set_val_surface(self, value: str):
+        self.val_surface = value
+
+    def set_val_rooms(self, value: str):
+        self.val_rooms = value
+
+    def run_appraisal(self):
+        from smartcity.valuation.appraise import appraise
+
+        self.val_error = ""
+        try:
+            surface = float(self.val_surface)
+            rooms = int(self.val_rooms)
+        except ValueError:
+            self.val_error = "surface and rooms must be numbers"
+            return
+        mk = load_market()
+        zone = next((z for z in mk["zone_meta"].values() if z["name"] == self.val_zone), None)
+        if zone is None:
+            self.val_error = f"unknown zone {self.val_zone}"
+            return
+        try:
+            doc = appraise(zone["lat"], zone["lon"], surface, rooms, self.val_type, save=True)
+        except Exception as exc:
+            self.val_error = f"appraisal failed: {exc}"
+            return
+        est = doc["estimate"]
+        f = doc["features"]
+        m = doc["model"]
+        self.val_estimate = f"{est['total_eur']:,.0f} €"
+        self.val_price_m2 = f"{est['price_m2_eur']:,.0f} €/m²"
+        self.val_model_info = (
+            f"model {m['name']} · median error {m['metrics']['median_ape_pct']}% "
+            f"on {m['metrics']['n_test']:,} held-out {m['metrics']['test_year']} sales"
+            f" · doc {doc['sha256'][:12]}…"
+        )
+        self.val_features = (
+            f"{f['zone']} · metro {f['nearest_subway']} at {f['dist_subway_m']:.0f}m · "
+            f"{f['n_schools_500m']} schools / {f['n_parks_500m']} parks / "
+            f"{f['n_supermarkets_500m']} shops within 500m · "
+            f"traffic occ. {f['zone_traffic_occupancy']}% · EAQI {f['zone_eaqi']}"
+        )
+        self.val_breakdown = [
+            [b["driver"], b["detail"], "" if b.get("effect_pct") is None else f"{b['effect_pct']:+.1f}%"]
+            for b in doc["breakdown"][:9]
+        ]
+
     def set_entity_input(self, value: str):
         self.entity_input = value
 
@@ -169,6 +250,7 @@ def navbar() -> rx.Component:
         rx.spacer(),
         rx.link("Map", href="/", color=INK_2),
         rx.link("Ontology", href="/ontology", color=INK_2),
+        rx.link("Valuation", href="/valuation", color=INK_2),
         rx.button("Refresh", on_click=State.load, size="1", variant="outline"),
         align="center", spacing="4", width="100%", padding_y="12px",
     )
@@ -250,6 +332,65 @@ def ontology() -> rx.Component:
                     spacing="3", width="100%", align="start", margin_top="10px",
                 ),
                 width="100%",
+            ),
+            spacing="3", width="100%", max_width="1200px", margin="0 auto", padding="0 20px 40px",
+        ),
+        background_color=PAGE_BG, min_height="100vh",
+    )
+
+
+@rx.page(route="/valuation", title="CityPulse — Valuation", on_load=State.load_valuation)
+def valuation() -> rx.Component:
+    return rx.box(
+        rx.vstack(
+            navbar(),
+            rx.hstack(
+                card(
+                    rx.heading("Appraise a property", size="3", color=INK, margin_bottom="4px"),
+                    rx.text(
+                        "Every input below becomes a walk in the city ontology: "
+                        "zone market comparables, distance to the nearest metro, "
+                        "amenities within 500m, road-traffic and air-quality burden.",
+                        size="1", color=MUTED,
+                    ),
+                    rx.hstack(
+                        rx.select(State.zone_names, value=State.val_zone, on_change=State.select_val_zone),
+                        rx.select(["Appartement", "Maison"], value=State.val_type, on_change=State.set_val_type),
+                        spacing="2", margin_top="10px",
+                    ),
+                    rx.hstack(
+                        rx.input(value=State.val_surface, on_change=State.set_val_surface, width="110px"),
+                        rx.text("m²", size="1", color=MUTED),
+                        rx.input(value=State.val_rooms, on_change=State.set_val_rooms, width="80px"),
+                        rx.text("rooms", size="1", color=MUTED),
+                        rx.button("Appraise", on_click=State.run_appraisal, size="2"),
+                        align="center", spacing="2", margin_top="8px",
+                    ),
+                    rx.cond(
+                        State.val_error != "",
+                        rx.text(State.val_error, size="1", color="#d03b3b", margin_top="6px"),
+                    ),
+                    rx.cond(
+                        State.val_estimate != "",
+                        rx.vstack(
+                            rx.heading(State.val_estimate, size="8", color=INK, margin_top="10px"),
+                            rx.text(State.val_price_m2, size="3", color=INK_2),
+                            rx.text(State.val_features, size="1", color=INK_2),
+                            rx.text(State.val_model_info, size="1", color=MUTED),
+                            rx.text("Value drivers (vs market median)", size="1", color=MUTED, margin_top="8px"),
+                            rx.data_table(data=State.val_breakdown, columns=["driver", "detail", "effect"]),
+                            spacing="1", align="start",
+                        ),
+                    ),
+                    flex="1",
+                ),
+                card(
+                    rx.text("Median €/m² by zone — apartments, last 2 years", size="2", color=INK_2, margin_bottom="8px"),
+                    rx.plotly(data=State.fig_market, width="100%"),
+                    rx.plotly(data=State.fig_market_trend, width="100%"),
+                    flex="1",
+                ),
+                spacing="3", width="100%", align="start",
             ),
             spacing="3", width="100%", max_width="1200px", margin="0 auto", padding="0 20px 40px",
         ),

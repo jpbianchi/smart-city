@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from smartcity.ingest.air_quality import poll_air_quality
 from smartcity.ingest.gbfs import poll_station_information, poll_station_status
+from smartcity.ingest.traffic import poll_traffic
 
 
 def poll_all(cycle: int = 0) -> None:
@@ -25,6 +26,9 @@ def poll_all(cycle: int = 0) -> None:
     print(f"[{ts}] gbfs_station_status: {n} stations")
     n = poll_air_quality()
     print(f"[{ts}] air_quality: {n} zone sensors")
+    if cycle % 30 == 0:  # the traffic feed only refreshes hourly
+        n = poll_traffic(hours=3)
+        print(f"[{ts}] traffic: {n} readings")
 
 
 def main() -> None:

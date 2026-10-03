@@ -76,3 +76,20 @@ def load_snapshot() -> dict:
         "kpis": kpis,
         "manifest": onto.manifest,
     }
+
+
+def load_market() -> dict:
+    """Zone-level market view for the valuation page."""
+    market = pd.read_parquet(GOLD_DIR / "zone_market")
+    zone_meta = {z["slug"]: z for z in zones()}
+    recent = market[(market["year"] >= market["year"].max() - 1)
+                    & (market["property_type"] == "Appartement")]
+    latest = (
+        recent.groupby("zone")
+        .agg(median_price_m2=("median_price_m2", "mean"), n_sales=("n_sales", "sum"))
+        .reset_index()
+    )
+    latest["name"] = latest["zone"].map(lambda s: zone_meta[s]["name"])
+    latest["lat"] = latest["zone"].map(lambda s: zone_meta[s]["lat"])
+    latest["lon"] = latest["zone"].map(lambda s: zone_meta[s]["lon"])
+    return {"market": market, "latest": latest, "zone_meta": zone_meta}

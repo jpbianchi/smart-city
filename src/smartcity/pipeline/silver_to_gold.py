@@ -3,69 +3,110 @@
   python -m smartcity.pipeline.silver_to_gold
 
 Gold tables (parquet):
-  gold/station_state   latest state per station, joined with dims + zone
-  gold/zone_hourly     per-zone hourly aggregates: mobility x air quality
-  gold/observations    unified long-format observation log (feeds the ontology)
+  gold/station_state        latest state per station, joined with dims + zone
+  gold/zone_hourly          per-zone hourly aggregates: mobility x air quality
+  gold/traffic_sensors      road-sensor dimension (latest name/geo + zone)
+  gold/zone_traffic_hourly  per-zone hourly traffic flow/occupancy
+  gold/amenities            POIs with zone
+  gold/zone_amenities       per-zone amenity counts by kind
+  gold/transactions         cleaned sales with zone
+  gold/zone_market          per-zone median EUR/m2 by year and property type
+  gold/transaction_features valuation feature matrix (one row per sale)
+  gold/observations         unified long-format observation log
 """
 from __future__ import annotations
 
-from pyspark.sql import functions as F
+from pyspark.sql import DataFrame, functions as F
 from pyspark.sql.window import Window
 
 from smartcity.config import GOLD_DIR, SILVER_DIR, zones
 from smartcity.pipeline.session import get_spark
 
+EARTH_KM = 6371.0
+
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    return (
+        F.asin(
+            F.sqrt(
+                F.pow(F.sin(F.radians(lat2 - lat1) / 2), 2)
+                + F.cos(F.radians(lat1)) * F.cos(F.radians(lat2))
+                * F.pow(F.sin(F.radians(lon2 - lon1) / 2), 2)
+            )
+        )
+        * 2 * EARTH_KM
+    )
+
+
+def _zone_df(spark):
+    return spark.createDataFrame(
+        [(z["slug"], z["name"], float(z["lat"]), float(z["lon"])) for z in zones()],
+        ["zone", "zone_name", "zone_lat", "zone_lon"],
+    )
+
+
+def with_zone(df: DataFrame, zone_df: DataFrame, keep_dist: bool = False) -> DataFrame:
+    """Assign every row (needs lat/lon) to its nearest zone center."""
+    tagged = df.withColumn("__rid", F.monotonically_increasing_id())
+    w = Window.partitionBy("__rid").orderBy("dist_km")
+    out = (
+        tagged.crossJoin(F.broadcast(zone_df))
+        .withColumn("dist_km", _haversine_km(F.col("zone_lat"), F.col("zone_lon"),
+                                             F.col("lat"), F.col("lon")))
+        .withColumn("rn", F.row_number().over(w))
+        .where("rn = 1")
+        .drop("rn", "zone_lat", "zone_lon", "__rid")
+    )
+    if keep_dist:
+        return out.withColumnRenamed("dist_km", "zone_dist_km")
+    return out.drop("dist_km")
+
+
+def _grid_cells(lat_col, lon_col, cell_lat: float, cell_lon: float):
+    return (F.floor(lat_col / cell_lat).cast("long"), F.floor(lon_col / cell_lon).cast("long"))
+
+
+def _neighbor_grid(df: DataFrame, cell_lat: float, cell_lon: float,
+                   lat="lat", lon="lon") -> DataFrame:
+    """Replicate each row into its cell and the 8 neighbors (for radius joins)."""
+    cy, cx = _grid_cells(F.col(lat), F.col(lon), cell_lat, cell_lon)
+    df = df.withColumn("_cy", cy).withColumn("_cx", cx)
+    offsets = [(dy, dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1)]
+    off = df.sparkSession.createDataFrame(offsets, ["_dy", "_dx"])
+    return (
+        df.crossJoin(F.broadcast(off))
+        .withColumn("_cy", F.col("_cy") + F.col("_dy"))
+        .withColumn("_cx", F.col("_cx") + F.col("_dx"))
+        .drop("_dy", "_dx")
+    )
+
 
 def main() -> None:
     spark = get_spark("silver_to_gold")
     spark.sparkContext.setLogLevel("WARN")
+    zone_df = _zone_df(spark)
 
     stations = spark.read.parquet(str(SILVER_DIR / "stations"))
     status = spark.read.parquet(str(SILVER_DIR / "station_status"))
     air = spark.read.parquet(str(SILVER_DIR / "air_quality"))
+    traffic = spark.read.parquet(str(SILVER_DIR / "traffic_readings"))
+    sales = spark.read.parquet(str(SILVER_DIR / "transactions"))
+    amenities = spark.read.parquet(str(SILVER_DIR / "amenities"))
 
-    # --- zone assignment: nearest zone center via broadcast cross-join -------
-    zone_df = spark.createDataFrame(
-        [(z["slug"], z["name"], float(z["lat"]), float(z["lon"])) for z in zones()],
-        ["zone", "zone_name", "zone_lat", "zone_lon"],
-    )
-    # haversine distance in km, pure column arithmetic (no UDF)
-    d = (
-        F.asin(
-            F.sqrt(
-                F.pow(F.sin(F.radians(F.col("zone_lat") - F.col("lat")) / 2), 2)
-                + F.cos(F.radians("lat"))
-                * F.cos(F.radians("zone_lat"))
-                * F.pow(F.sin(F.radians(F.col("zone_lon") - F.col("lon")) / 2), 2)
-            )
-        )
-        * 2
-        * 6371.0
-    )
-    w_near = Window.partitionBy("station_id").orderBy("dist_km")
-    station_zone = (
-        stations.crossJoin(F.broadcast(zone_df))
-        .withColumn("dist_km", d)
-        .withColumn("rn", F.row_number().over(w_near))
-        .where("rn = 1")
-        .select("station_id", "name", "lat", "lon", "capacity", "zone", "zone_name",
-                F.round("dist_km", 3).alias("zone_dist_km"))
-    )
-
-    # --- gold/station_state: latest telemetry per station --------------------
+    # --- stations: zone + latest state (unchanged behaviour) -----------------
+    station_zone = with_zone(
+        stations.select("station_id", "name", "lat", "lon", "capacity"), zone_df, keep_dist=True
+    ).withColumn("zone_dist_km", F.round("zone_dist_km", 3))
     w_latest = Window.partitionBy("station_id").orderBy(F.desc("reported_at"))
     latest_status = status.withColumn("rn", F.row_number().over(w_latest)).where("rn = 1").drop("rn")
-    station_state = (
-        station_zone.join(latest_status, "station_id", "left")
-        .withColumn(
-            "fill_ratio",
-            F.when(F.col("capacity") > 0, F.col("bikes_available") / F.col("capacity")),
-        )
+    station_state = station_zone.join(latest_status, "station_id", "left").withColumn(
+        "fill_ratio",
+        F.when(F.col("capacity") > 0, F.col("bikes_available") / F.col("capacity")),
     )
     station_state.write.mode("overwrite").parquet(str(GOLD_DIR / "station_state"))
     print(f"gold/station_state: {station_state.count()} stations")
 
-    # --- gold/zone_hourly: mobility x environment per zone per hour ----------
+    # --- zone_hourly: mobility x environment ---------------------------------
     mobility = (
         status.join(station_zone.select("station_id", "zone"), "station_id")
         .withColumn("hour", F.date_trunc("hour", "reported_at"))
@@ -92,7 +133,116 @@ def main() -> None:
     zone_hourly.write.mode("overwrite").parquet(str(GOLD_DIR / "zone_hourly"))
     print(f"gold/zone_hourly: {zone_hourly.count()} zone-hours")
 
-    # --- gold/observations: unified long-format log (ontology feedstock) -----
+    # --- traffic: sensor dim + per-zone hourly --------------------------------
+    w_sensor = Window.partitionBy("sensor_id").orderBy(F.desc("observed_at"))
+    sensor_dim = (
+        traffic.withColumn("rn", F.row_number().over(w_sensor)).where("rn = 1")
+        .select("sensor_id", "name", "lat", "lon",
+                F.col("observed_at").alias("last_seen"),
+                F.col("flow_vph").alias("last_flow_vph"),
+                F.col("occupancy_pct").alias("last_occupancy_pct"),
+                F.col("state").alias("last_state"))
+    )
+    traffic_sensors = with_zone(sensor_dim, zone_df)
+    traffic_sensors.write.mode("overwrite").parquet(str(GOLD_DIR / "traffic_sensors"))
+    print(f"gold/traffic_sensors: {traffic_sensors.count()} sensors")
+
+    sensor_zone = traffic_sensors.select("sensor_id", "zone")
+    zone_traffic_hourly = (
+        traffic.join(sensor_zone, "sensor_id")
+        .groupBy("zone", F.date_trunc("hour", "observed_at").alias("hour"))
+        .agg(
+            F.round(F.avg("flow_vph"), 1).alias("avg_flow_vph"),
+            F.round(F.avg("occupancy_pct"), 2).alias("avg_occupancy_pct"),
+            F.countDistinct("sensor_id").alias("sensors_reporting"),
+        )
+    )
+    zone_traffic_hourly.write.mode("overwrite").parquet(str(GOLD_DIR / "zone_traffic_hourly"))
+    print(f"gold/zone_traffic_hourly: {zone_traffic_hourly.count()} zone-hours")
+
+    # --- amenities -------------------------------------------------------------
+    amen_zone = with_zone(amenities, zone_df)
+    amen_zone.write.mode("overwrite").parquet(str(GOLD_DIR / "amenities"))
+    zone_amenities = amen_zone.groupBy("zone").pivot("kind").count().na.fill(0)
+    zone_amenities.write.mode("overwrite").parquet(str(GOLD_DIR / "zone_amenities"))
+    print(f"gold/amenities: {amen_zone.count()} POIs")
+
+    # --- transactions + market -------------------------------------------------
+    tx_zone = with_zone(sales, zone_df)
+    tx_zone = tx_zone.withColumn("tx_id", F.concat(F.lit("tx:"), "id_mutation", F.lit(":"), "id_parcelle"))
+    tx_zone.write.mode("overwrite").parquet(str(GOLD_DIR / "transactions"))
+    print(f"gold/transactions: {tx_zone.count()} sales")
+
+    zone_market = (
+        tx_zone.groupBy("zone", "year", "property_type")
+        .agg(
+            F.expr("percentile_approx(price_m2, 0.5)").alias("median_price_m2"),
+            F.count("*").alias("n_sales"),
+        )
+    )
+    zone_market.write.mode("overwrite").parquet(str(GOLD_DIR / "zone_market"))
+    print(f"gold/zone_market: {zone_market.count()} zone-year-type rows")
+
+    # --- valuation feature matrix ----------------------------------------------
+    # nearest subway: 349 stations -> full broadcast join is cheap enough
+    subway = amen_zone.where(F.col("kind") == "subway_station").select(
+        F.col("osm_id").alias("subway_id"),
+        F.col("lat").alias("s_lat"), F.col("lon").alias("s_lon"),
+    )
+    w_tx = Window.partitionBy("tx_id").orderBy("d_subway")
+    tx_subway = (
+        tx_zone.select("tx_id", "lat", "lon")
+        .crossJoin(F.broadcast(subway))
+        .withColumn("d_subway", _haversine_km(F.col("lat"), F.col("lon"),
+                                              F.col("s_lat"), F.col("s_lon")))
+        .withColumn("rn", F.row_number().over(w_tx))
+        .where("rn = 1")
+        .select("tx_id", "subway_id", F.round(F.col("d_subway") * 1000, 0).alias("dist_subway_m"))
+    )
+
+    # counts within 500m via 3x3 grid-cell join (cells ~500m)
+    CELL_LAT, CELL_LON = 0.0045, 0.0068
+    cy, cx = _grid_cells(F.col("lat"), F.col("lon"), CELL_LAT, CELL_LON)
+    tx_cells = tx_zone.select("tx_id", "lat", "lon").withColumn("_cy", cy).withColumn("_cx", cx)
+    amen_grid = _neighbor_grid(
+        amen_zone.where(F.col("kind").isin("school", "park", "supermarket"))
+        .select("kind", F.col("lat").alias("a_lat"), F.col("lon").alias("a_lon"))
+        .withColumnRenamed("a_lat", "lat").withColumnRenamed("a_lon", "lon"),
+        CELL_LAT, CELL_LON,
+    ).withColumnRenamed("lat", "a_lat").withColumnRenamed("lon", "a_lon")
+    near_counts = (
+        tx_cells.join(amen_grid, ["_cy", "_cx"])
+        .where(_haversine_km(F.col("lat"), F.col("lon"), F.col("a_lat"), F.col("a_lon")) <= 0.5)
+        .groupBy("tx_id").pivot("kind", ["school", "park", "supermarket"]).count()
+        .na.fill(0)
+        .withColumnRenamed("school", "n_schools_500m")
+        .withColumnRenamed("park", "n_parks_500m")
+        .withColumnRenamed("supermarket", "n_supermarkets_500m")
+    )
+
+    # per-zone ambient indicators (static-ish context features)
+    zone_traffic_mean = (
+        zone_traffic_hourly.groupBy("zone")
+        .agg(F.round(F.avg("avg_occupancy_pct"), 2).alias("zone_traffic_occupancy"))
+    )
+    zone_air_mean = air.groupBy("zone").agg(F.round(F.avg("eaqi"), 1).alias("zone_eaqi"))
+
+    features = (
+        tx_zone.select(
+            "tx_id", "zone", "property_type", "surface_m2", "rooms", "price_eur",
+            "price_m2", "year", "sold_on", "lat", "lon", "postal_code",
+            F.months_between(F.col("sold_on"), F.lit("2021-01-01")).cast("int").alias("month_index"),
+        )
+        .join(tx_subway, "tx_id", "left")
+        .join(near_counts, "tx_id", "left")
+        .join(zone_traffic_mean, "zone", "left")
+        .join(zone_air_mean, "zone", "left")
+        .na.fill({"n_schools_500m": 0, "n_parks_500m": 0, "n_supermarkets_500m": 0})
+    )
+    features.write.mode("overwrite").parquet(str(GOLD_DIR / "transaction_features"))
+    print(f"gold/transaction_features: {features.count()} rows")
+
+    # --- unified observation log (ontology feedstock) ---------------------------
     station_obs = (
         status.join(station_zone.select("station_id", "zone"), "station_id")
         .select(
@@ -115,15 +265,30 @@ def main() -> None:
         "observed_at",
         F.explode(
             F.create_map(
-                F.lit("pm2_5"), "pm2_5",
-                F.lit("pm10"), "pm10",
-                F.lit("no2"), "no2",
-                F.lit("o3"), "o3",
-                F.lit("eaqi"), "eaqi",
+                F.lit("pm2_5"), "pm2_5", F.lit("pm10"), "pm10",
+                F.lit("no2"), "no2", F.lit("o3"), "o3", F.lit("eaqi"), "eaqi",
             )
         ).alias("metric", "value"),
     )
-    observations = station_obs.unionByName(air_obs).where(F.col("value").isNotNull())
+    traffic_obs = (
+        traffic.join(sensor_zone, "sensor_id")
+        .select(
+            F.concat(F.lit("traffic:"), "sensor_id").alias("entity_id"),
+            F.lit("TrafficSensor").alias("entity_type"),
+            "zone",
+            "observed_at",
+            F.explode(
+                F.create_map(
+                    F.lit("flow_vph"), "flow_vph",
+                    F.lit("occupancy_pct"), "occupancy_pct",
+                )
+            ).alias("metric", "value"),
+        )
+    )
+    observations = (
+        station_obs.unionByName(air_obs).unionByName(traffic_obs)
+        .where(F.col("value").isNotNull())
+    )
     observations.write.mode("overwrite").parquet(str(GOLD_DIR / "observations"))
     print(f"gold/observations: {observations.count()} observations")
 

@@ -21,8 +21,19 @@ OBJECT_FILES = {
     "BikeStation": ("bike_station", "object_id"),
     "AirQualitySensor": ("air_quality_sensor", "object_id"),
     "Observation": ("observation", "observation_id"),
+    "TrafficSensor": ("traffic_sensor", "object_id"),
+    "Amenity": ("amenity", "object_id"),
+    "PropertyTransaction": ("property_transaction", "tx_id"),
 }
-LINK_FILES = {"locatedIn": "located_in", "monitors": "monitors", "observedBy": "observed_by"}
+LINK_FILES = {
+    "locatedIn": "located_in",
+    "monitors": "monitors",
+    "observedBy": "observed_by",
+    "monitorsRoad": "monitors_road",
+    "amenityIn": "amenity_in",
+    "transactionIn": "transaction_in",
+    "nearestStation": "nearest_station",
+}
 
 
 @dataclass
@@ -101,16 +112,37 @@ class Ontology:
             out = out[out["metric"] == metric]
         return out
 
+    def transactions_in_zone(self, zone_id: str, property_type: str | None = None,
+                             since_year: int | None = None) -> pd.DataFrame:
+        """Comparables query: sales linked to a zone, optionally filtered."""
+        ids = self.linked_from("transactionIn", zone_id)["from_id"]
+        tx = self.objects.get("PropertyTransaction")
+        if tx is None or ids.empty:
+            return pd.DataFrame()
+        out = tx.loc[tx.index.intersection(ids)]
+        if property_type:
+            out = out[out["property_type"] == property_type]
+        if since_year:
+            out = out[out["year"] >= since_year]
+        return out
+
     def zone_context(self, zone_id: str) -> dict:
-        """One multi-hop query: a zone, its stations, its sensor, latest air."""
+        """One multi-hop query: a zone, its stations, sensors, market, air."""
         zone = self.get(zone_id)
         stations = self.stations_in_zone(zone_id)
         sensor = self.sensor_for_zone(zone_id)
+        road_sensors = self.linked_from("monitorsRoad", zone_id)
+        amenities = self.linked_from("amenityIn", zone_id)
+        tx = self.transactions_in_zone(zone_id, since_year=2024)
         return {
             "zone": zone,
             "n_stations": len(stations),
             "bikes_available": int(stations["bikes_available"].fillna(0).sum()) if not stations.empty else 0,
             "sensor": sensor,
+            "n_road_sensors": len(road_sensors),
+            "n_amenities": len(amenities),
+            "n_recent_sales": len(tx),
+            "median_price_m2": float(tx["price_m2"].median()) if not tx.empty else None,
         }
 
 

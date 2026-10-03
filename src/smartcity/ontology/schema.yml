@@ -64,6 +64,54 @@ object_types:
       value:          { type: double }
       observed_at:    { type: timestamp }
 
+  TrafficSensor:
+    description: A permanent road induction-loop counter on a street segment.
+    sosa_class: sosa:Sensor
+    primary_key: sensor_id
+    title_property: name
+    source: gold/traffic_sensors
+    properties:
+      sensor_id:          { type: string, description: "traffic:<counter id>" }
+      name:               { type: string }
+      lat:                { type: double }
+      lon:                { type: double }
+      last_flow_vph:      { type: double, description: vehicles/hour, latest }
+      last_occupancy_pct: { type: double, description: "road occupancy %, latest" }
+      last_state:         { type: string, description: Fluide / Saturé / ... }
+      last_seen:          { type: timestamp }
+
+  Amenity:
+    description: A value-driving point of interest (metro, school, park, shop, hospital).
+    primary_key: amenity_id
+    title_property: name
+    source: gold/amenities
+    properties:
+      amenity_id: { type: string, description: "poi:<osm type/id>" }
+      kind:       { type: string }
+      name:       { type: string }
+      lat:        { type: double }
+      lon:        { type: double }
+
+  PropertyTransaction:
+    description: >
+      A real property sale (DVF). Stable id derived from the official mutation
+      and parcel ids, so the same object can later be referenced by an on-chain
+      token without re-keying (see future_types below).
+    primary_key: tx_id
+    source: gold/transactions
+    properties:
+      tx_id:         { type: string, description: "tx:<id_mutation>:<id_parcelle>" }
+      property_type: { type: string, description: Appartement | Maison }
+      price_eur:     { type: double }
+      surface_m2:    { type: double }
+      rooms:         { type: int }
+      price_m2:      { type: double }
+      sold_on:       { type: date }
+      year:          { type: int }
+      postal_code:   { type: string }
+      lat:           { type: double }
+      lon:           { type: double }
+
 link_types:
   locatedIn:
     from: BikeStation
@@ -77,6 +125,39 @@ link_types:
     derivation: sensor is instantiated at the zone center
   observedBy:
     from: Observation
-    to: [BikeStation, AirQualitySensor]
+    to: [BikeStation, AirQualitySensor, TrafficSensor]
     cardinality: many-to-one
     derivation: entity_id of the gold observation log
+  monitorsRoad:
+    from: TrafficSensor
+    to: Zone
+    cardinality: many-to-one
+    derivation: nearest zone center (haversine), computed in silver_to_gold
+  amenityIn:
+    from: Amenity
+    to: Zone
+    cardinality: many-to-one
+    derivation: nearest zone center (haversine), computed in silver_to_gold
+  transactionIn:
+    from: PropertyTransaction
+    to: Zone
+    cardinality: many-to-one
+    derivation: nearest zone center (haversine), computed in silver_to_gold
+  nearestStation:
+    from: PropertyTransaction
+    to: Amenity
+    cardinality: many-to-one
+    properties: { dist_m: double }
+    derivation: nearest subway station, geospatial join in silver_to_gold
+
+# ---------------------------------------------------------------------------
+# future_types (reserved — tokenization layer, not yet materialized):
+#   Asset:          a building/parcel aggregating PropertyTransaction history;
+#                   its stable id (parcel id) becomes the token's underlying
+#                   asset reference.
+#   PropertyToken:  on-chain representation of an Asset share; links
+#                   tokenizes -> Asset, valuedBy -> Appraisal.
+#   Appraisal:      a versioned, content-hashed valuation document produced by
+#                   smartcity.valuation (already emitted as hashable JSON) —
+#                   the oracle payload a smart contract can anchor.
+# ---------------------------------------------------------------------------

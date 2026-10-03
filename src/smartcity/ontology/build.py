@@ -44,6 +44,12 @@ def build() -> dict:
     station_state = pd.read_parquet(GOLD_DIR / "station_state")
     zone_hourly = pd.read_parquet(GOLD_DIR / "zone_hourly")
     observations = pd.read_parquet(GOLD_DIR / "observations")
+    traffic_sensors = pd.read_parquet(GOLD_DIR / "traffic_sensors")
+    amenities = pd.read_parquet(GOLD_DIR / "amenities")
+    transactions = pd.read_parquet(GOLD_DIR / "transactions")
+    tx_features = pd.read_parquet(
+        GOLD_DIR / "transaction_features", columns=["tx_id", "subway_id", "dist_subway_m"]
+    )
     counts: dict[str, int] = {}
 
     # ---- objects: Zone ------------------------------------------------------
@@ -99,11 +105,54 @@ def build() -> dict:
     observation = obs[["observation_id", "entity_id", "entity_type", "metric", "value", "observed_at"]]
     counts["Observation"] = _write(observation, "objects", "observation")
 
+    # ---- objects: TrafficSensor ---------------------------------------------
+    ts = traffic_sensors.copy()
+    ts["object_id"] = "traffic:" + ts["sensor_id"].astype(str)
+    sensor_objs = ts[["object_id", "sensor_id", "name", "lat", "lon", "last_flow_vph",
+                      "last_occupancy_pct", "last_state", "last_seen", "zone"]]
+    counts["TrafficSensor"] = _write(sensor_objs, "objects", "traffic_sensor")
+
+    # ---- objects: Amenity ------------------------------------------------------
+    am = amenities.copy()
+    am["object_id"] = "poi:" + am["osm_id"].astype(str)
+    amenity_objs = am[["object_id", "osm_id", "kind", "name", "lat", "lon", "zone"]]
+    counts["Amenity"] = _write(amenity_objs, "objects", "amenity")
+
+    # ---- objects: PropertyTransaction ------------------------------------------
+    tx = transactions.copy()
+    tx_objs = tx[["tx_id", "property_type", "price_eur", "surface_m2", "rooms",
+                  "price_m2", "sold_on", "year", "postal_code", "lat", "lon", "zone"]]
+    counts["PropertyTransaction"] = _write(tx_objs, "objects", "property_transaction")
+
     # ---- links ---------------------------------------------------------------
     located_in = pd.DataFrame(
         {"from_id": bike_station["object_id"], "to_id": "zone:" + bike_station["zone"]}
     )
     counts["locatedIn"] = _write(located_in, "links", "located_in")
+
+    monitors_road = pd.DataFrame(
+        {"from_id": sensor_objs["object_id"], "to_id": "zone:" + sensor_objs["zone"]}
+    )
+    counts["monitorsRoad"] = _write(monitors_road, "links", "monitors_road")
+
+    amenity_in = pd.DataFrame(
+        {"from_id": amenity_objs["object_id"], "to_id": "zone:" + amenity_objs["zone"]}
+    )
+    counts["amenityIn"] = _write(amenity_in, "links", "amenity_in")
+
+    transaction_in = pd.DataFrame(
+        {"from_id": tx_objs["tx_id"], "to_id": "zone:" + tx_objs["zone"]}
+    )
+    counts["transactionIn"] = _write(transaction_in, "links", "transaction_in")
+
+    nearest_station = (
+        tx_features.dropna(subset=["subway_id"])
+        .rename(columns={"tx_id": "from_id"})
+        .assign(to_id=lambda d: "poi:" + d["subway_id"].astype(str))
+        [["from_id", "to_id", "dist_subway_m"]]
+        .rename(columns={"dist_subway_m": "dist_m"})
+    )
+    counts["nearestStation"] = _write(nearest_station, "links", "nearest_station")
 
     monitors = pd.DataFrame(
         {"from_id": sensor["object_id"], "to_id": "zone:" + sensor["zone"]}

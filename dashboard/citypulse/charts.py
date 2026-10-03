@@ -119,6 +119,61 @@ def build_zone_bar(zone_agg: pd.DataFrame) -> go.Figure:
     return _base_layout(fig, 420)
 
 
+def build_market_map(latest: pd.DataFrame, center: dict) -> go.Figure:
+    """Zone medians as a priced map — EUR/m2 on the blue sequential ramp."""
+    fig = go.Figure(
+        go.Scattermap(
+            lat=latest["lat"], lon=latest["lon"],
+            mode="markers+text",
+            text=latest["median_price_m2"].map(lambda v: f"{v/1000:.1f}k€"),
+            textfont=dict(size=11, color=INK),
+            textposition="top center",
+            marker=dict(
+                size=34,
+                color=latest["median_price_m2"],
+                colorscale=_ramp_scale(BLUE_RAMP),
+                opacity=0.8,
+                colorbar=dict(
+                    title=dict(text="€/m²", font=dict(size=12, color=INK_MUTED)),
+                    thickness=10, outlinewidth=0,
+                    tickfont=dict(size=11, color=INK_MUTED), len=0.5, y=0.25,
+                ),
+            ),
+            customdata=latest[["name", "median_price_m2", "n_sales"]],
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>median %{customdata[1]:,.0f} €/m²<br>"
+                "%{customdata[2]:,} sales (last 2 years)<extra>market</extra>"
+            ),
+        )
+    )
+    fig.update_layout(
+        map=dict(style="carto-positron", center=dict(lat=center["lat"], lon=center["lon"]), zoom=10.8),
+    )
+    return _base_layout(fig, 480)
+
+
+def build_market_trend(market: pd.DataFrame, zone_slug: str, zone_name: str,
+                       property_type: str) -> go.Figure:
+    df = market[(market["zone"] == zone_slug) & (market["property_type"] == property_type)]
+    df = df.sort_values("year")
+    fig = go.Figure(
+        go.Scatter(
+            x=df["year"], y=df["median_price_m2"],
+            mode="lines+markers",
+            line=dict(color=SERIES_BLUE, width=2),
+            marker=dict(size=8),
+            customdata=df[["n_sales"]],
+            hovertemplate="%{x}: %{y:,.0f} €/m² (%{customdata[0]:,} sales)<extra></extra>",
+        )
+    )
+    fig.update_xaxes(gridcolor=GRID, tickfont=dict(color=INK_MUTED), dtick=1)
+    fig.update_yaxes(gridcolor=GRID, tickfont=dict(color=INK_MUTED), tickformat=",.0f")
+    fig.update_layout(title=dict(text=f"Median €/m² — {zone_name} ({property_type})", font=dict(size=14)))
+    fig = _base_layout(fig, 300)
+    fig.update_layout(margin=dict(t=42))
+    return fig
+
+
 def build_zone_history(zone_hourly: pd.DataFrame, zone_slug: str, zone_name: str) -> go.Figure:
     df = zone_hourly[zone_hourly["zone"] == zone_slug].sort_values("hour")
     fig = go.Figure()
