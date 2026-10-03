@@ -1,0 +1,82 @@
+# City ontology schema — declared first, hydrated from gold datasets.
+#
+# This follows the Palantir-Foundry mental model: an ontology is a typed
+# semantic layer (object types, properties, link types) materialized FROM
+# pipelines, so the graph is always derived from ingested data, never
+# hand-maintained. The sensing vocabulary maps onto W3C SOSA/SSN
+# (sosa:Sensor, sosa:Observation, sosa:FeatureOfInterest) — see sosa_class
+# annotations and export_jsonld.py.
+
+object_types:
+  Zone:
+    description: A named district of the city; the spatial anchor of the graph.
+    sosa_class: sosa:FeatureOfInterest
+    primary_key: zone_id
+    title_property: name
+    properties:
+      zone_id:   { type: string, description: "zone:<slug>" }
+      name:      { type: string }
+      lat:       { type: double }
+      lon:       { type: double }
+
+  BikeStation:
+    description: A physical bike-share dock station reporting real-time telemetry.
+    sosa_class: sosa:Platform
+    primary_key: station_id
+    title_property: name
+    source: gold/station_state
+    properties:
+      station_id:      { type: string, description: "station:<gbfs id>" }
+      name:            { type: string }
+      lat:             { type: double }
+      lon:             { type: double }
+      capacity:        { type: int }
+      bikes_available: { type: int,    description: latest telemetry }
+      docks_available: { type: int,    description: latest telemetry }
+      fill_ratio:      { type: double, description: bikes / capacity }
+      is_renting:      { type: boolean }
+      reported_at:     { type: timestamp }
+
+  AirQualitySensor:
+    description: A virtual air-quality sensor at a zone center (Open-Meteo model).
+    sosa_class: sosa:Sensor
+    primary_key: sensor_id
+    title_property: name
+    source: gold/zone_hourly
+    properties:
+      sensor_id: { type: string, description: "aq:<zone slug>" }
+      name:      { type: string }
+      lat:       { type: double }
+      lon:       { type: double }
+      pm2_5:     { type: double, description: latest µg/m³ }
+      no2:       { type: double, description: latest µg/m³ }
+      eaqi:      { type: double, description: latest European AQI }
+      observed_at: { type: timestamp }
+
+  Observation:
+    description: A single timestamped measurement made by a station or sensor.
+    sosa_class: sosa:Observation
+    primary_key: observation_id
+    source: gold/observations
+    properties:
+      observation_id: { type: string }
+      metric:         { type: string, description: "sosa:ObservableProperty" }
+      value:          { type: double }
+      observed_at:    { type: timestamp }
+
+link_types:
+  locatedIn:
+    from: BikeStation
+    to: Zone
+    cardinality: many-to-one
+    derivation: nearest zone center (haversine), computed in silver_to_gold
+  monitors:
+    from: AirQualitySensor
+    to: Zone
+    cardinality: one-to-one
+    derivation: sensor is instantiated at the zone center
+  observedBy:
+    from: Observation
+    to: [BikeStation, AirQualitySensor]
+    cardinality: many-to-one
+    derivation: entity_id of the gold observation log

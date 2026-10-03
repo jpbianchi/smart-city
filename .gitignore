@@ -1,0 +1,9 @@
+.venv/
+data/
+__pycache__/
+*.pyc
+dashboard/.web/
+dashboard/assets/external/
+.states/
+.vscode/
+.DS_Store

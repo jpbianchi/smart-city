@@ -1,0 +1,6 @@
+/* Chrome's "Auto dark mode for web contents" (force-dark) rewrites Plotly's
+   transparent overlay-svg backgrounds to opaque dark, hiding the plot beneath.
+   Keep every stacked svg above the first explicitly transparent. */
+.js-plotly-plot svg.main-svg:not(:first-of-type) {
+  background: transparent !important;
+}

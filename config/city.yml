@@ -1,0 +1,32 @@
+# City configuration — Paris / Vélib' Métropole
+# Zones are the spatial backbone of the ontology: every station and sensor
+# is assigned to its nearest zone center (haversine).
+
+city:
+  name: Paris
+  slug: paris
+  center: { lat: 48.8566, lon: 2.3522 }
+
+feeds:
+  gbfs:
+    system: velib-metropole
+    station_information: https://velib-metropole-opendata.smovengo.cloud/opendata/Velib_Metropole/station_information.json
+    station_status: https://velib-metropole-opendata.smovengo.cloud/opendata/Velib_Metropole/station_status.json
+  air_quality:
+    # Open-Meteo air quality model, polled once per zone center (no API key).
+    base_url: https://air-quality-api.open-meteo.com/v1/air-quality
+    variables: [pm10, pm2_5, nitrogen_dioxide, ozone, european_aqi]
+
+zones:
+  - { slug: louvre-center,    name: "Louvre / Centre",      lat: 48.8615, lon: 2.3365 }
+  - { slug: marais-bastille,  name: "Marais / Bastille",    lat: 48.8560, lon: 2.3655 }
+  - { slug: latin-quarter,    name: "Quartier Latin",       lat: 48.8470, lon: 2.3440 }
+  - { slug: montparnasse,     name: "Montparnasse",         lat: 48.8390, lon: 2.3200 }
+  - { slug: champs-elysees,   name: "Champs-Élysées",       lat: 48.8700, lon: 2.3070 }
+  - { slug: montmartre,       name: "Montmartre",           lat: 48.8865, lon: 2.3430 }
+  - { slug: belleville,       name: "Belleville / Est",     lat: 48.8720, lon: 2.3830 }
+  - { slug: bercy,            name: "Bercy / Sud-Est",      lat: 48.8330, lon: 2.3870 }
+  - { slug: boulogne-west,    name: "Boulogne / Ouest",     lat: 48.8380, lon: 2.2500 }
+  - { slug: la-defense,       name: "La Défense",           lat: 48.8920, lon: 2.2380 }
+  - { slug: ivry-south,       name: "Ivry / Sud",           lat: 48.8140, lon: 2.3840 }
+  - { slug: saint-denis,      name: "Saint-Denis / Nord",   lat: 48.9360, lon: 2.3570 }
