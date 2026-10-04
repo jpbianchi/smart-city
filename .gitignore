@@ -4,6 +4,8 @@ __pycache__/
 *.pyc
 dashboard/.web/
 dashboard/assets/external/
+chain/out/
+chain/cache/
 .states/
 .vscode/
 .DS_Store
