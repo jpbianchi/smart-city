@@ -343,7 +343,7 @@ def appraise_page() -> rx.Component:
     )
 
 
-from citypulse import properties, sources_page  # noqa: E402,F401  (register pages)
+from citypulse import properties, sources_page, tokens  # noqa: E402,F401  (register pages)
 
 app = rx.App(
     style={"font_family": 'system-ui, -apple-system, "Segoe UI", sans-serif', "background": PAGE_BG},

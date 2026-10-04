@@ -120,7 +120,7 @@ def build() -> dict:
 
     # ---- objects: PropertyTransaction ------------------------------------------
     tx = transactions.copy()
-    tx_objs = tx[["tx_id", "property_type", "price_eur", "surface_m2", "rooms",
+    tx_objs = tx[["tx_id", "address", "property_type", "price_eur", "surface_m2", "rooms",
                   "price_m2", "sold_on", "year", "postal_code", "lat", "lon", "zone"]]
     counts["PropertyTransaction"] = _write(tx_objs, "objects", "property_transaction")
 
@@ -167,6 +167,54 @@ def build() -> dict:
         }
     )
     counts["observedBy"] = _write(observed_by, "links", "observed_by")
+
+    # ---- on-chain layer: Asset / PropertyToken / Appraisal ---------------------
+    # Derived from the chain indexer (data/chain/*.parquet) exactly like any
+    # other source; absent until something has been tokenized.
+    chain_tokens = GOLD_DIR.parent / "chain" / "tokens.parquet"
+    if chain_tokens.exists():
+        tok = pd.read_parquet(chain_tokens)
+        asset = pd.DataFrame({
+            "asset_id": "asset:" + tok["listing_id"].str.removeprefix("tx:"),
+            "listing_id": tok["listing_id"],
+            "address": tok["chain_address_label"],
+            "surface_m2": tok["surface_m2"],
+        })
+        counts["Asset"] = _write(asset, "objects", "asset")
+
+        token = pd.DataFrame({
+            "token_id": tok["token_id"],
+            "listing_id": tok["listing_id"],
+            "shares_supply": tok["shares_supply"],
+            "n_holders": tok["n_holders"],
+            "free_float_pct": tok["free_float_pct"],
+            "last_share_price_eur": tok["last_share_price_eur"],
+            "market_cap_eur": tok["market_cap_eur"],
+            "minted_at": tok["minted_at"],
+            "mint_tx": tok["mint_tx"],
+        })
+        counts["PropertyToken"] = _write(token, "objects", "property_token")
+
+        appraisal = pd.DataFrame({
+            "appraisal_id": "appraisal:" + tok["appraisal_sha256"].str[:16],
+            "sha256": tok["appraisal_sha256"],
+            "fair_value_eur": tok["onchain_fair_eur"],
+            "as_of_month": tok["appraisal_as_of"],
+        })
+        counts["Appraisal"] = _write(appraisal, "objects", "appraisal")
+
+        counts["tokenizes"] = _write(
+            pd.DataFrame({"from_id": token["token_id"], "to_id": asset["asset_id"]}),
+            "links", "tokenizes",
+        )
+        counts["deedOf"] = _write(
+            pd.DataFrame({"from_id": asset["asset_id"], "to_id": tok["listing_id"]}),
+            "links", "deed_of",
+        )
+        counts["valuedBy"] = _write(
+            pd.DataFrame({"from_id": token["token_id"], "to_id": appraisal["appraisal_id"]}),
+            "links", "valued_by",
+        )
 
     manifest = {
         "built_at": datetime.now(timezone.utc).isoformat(),

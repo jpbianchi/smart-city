@@ -24,6 +24,9 @@ OBJECT_FILES = {
     "TrafficSensor": ("traffic_sensor", "object_id"),
     "Amenity": ("amenity", "object_id"),
     "PropertyTransaction": ("property_transaction", "tx_id"),
+    "Asset": ("asset", "asset_id"),
+    "PropertyToken": ("property_token", "token_id"),
+    "Appraisal": ("appraisal", "appraisal_id"),
 }
 LINK_FILES = {
     "locatedIn": "located_in",
@@ -33,6 +36,9 @@ LINK_FILES = {
     "amenityIn": "amenity_in",
     "transactionIn": "transaction_in",
     "nearestStation": "nearest_station",
+    "tokenizes": "tokenizes",
+    "deedOf": "deed_of",
+    "valuedBy": "valued_by",
 }
 
 

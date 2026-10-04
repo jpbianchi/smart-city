@@ -101,6 +101,7 @@ object_types:
     source: gold/transactions
     properties:
       tx_id:         { type: string, description: "tx:<id_mutation>:<id_parcelle>" }
+      address:       { type: string, description: street address (DVF) }
       property_type: { type: string, description: Appartement | Maison }
       price_eur:     { type: double }
       surface_m2:    { type: double }
@@ -151,13 +152,56 @@ link_types:
     derivation: nearest subway station, geospatial join in silver_to_gold
 
 # ---------------------------------------------------------------------------
-# future_types (reserved — tokenization layer, not yet materialized):
-#   Asset:          a building/parcel aggregating PropertyTransaction history;
-#                   its stable id (parcel id) becomes the token's underlying
-#                   asset reference.
-#   PropertyToken:  on-chain representation of an Asset share; links
-#                   tokenizes -> Asset, valuedBy -> Appraisal.
-#   Appraisal:      a versioned, content-hashed valuation document produced by
-#                   smartcity.valuation (already emitted as hashable JSON) —
-#                   the oracle payload a smart contract can anchor.
+# On-chain layer — hydrated from the chain indexer (smartcity.tokenization),
+# present once properties have been tokenized. The chain is one more source:
+# its state lands in data/chain/*.parquet and becomes objects like any other.
 # ---------------------------------------------------------------------------
+
+onchain_object_types:
+  Asset:
+    description: >
+      The real-world property underlying a token, keyed by the same official
+      mutation+parcel id as its PropertyTransaction — no re-keying between
+      the data platform and the chain.
+    primary_key: asset_id
+    source: data/chain/tokens.parquet
+    properties:
+      asset_id:   { type: string, description: "asset:<mutation>:<parcelle>" }
+      listing_id: { type: string }
+      address:    { type: string }
+      surface_m2: { type: double }
+
+  PropertyToken:
+    description: >
+      The on-chain representation: ERC-721 deed (tokenId = keccak of the
+      listing id) escrowed in the fractionalizer, 1,000 fungible shares.
+    primary_key: token_id
+    source: data/chain/tokens.parquet (PropertyDeed + PropertyShares state)
+    properties:
+      token_id:             { type: string, description: deed tokenId (hex) }
+      shares_supply:        { type: int }
+      n_holders:            { type: int }
+      free_float_pct:       { type: double }
+      last_share_price_eur: { type: double, description: last marketplace fill }
+      market_cap_eur:       { type: double }
+      minted_at:            { type: timestamp }
+      mint_tx:              { type: string }
+
+  Appraisal:
+    description: >
+      Content-hashed valuation document anchored by the AppraisalOracle
+      contract; the sha256 on-chain commits to the off-chain JSON.
+    primary_key: appraisal_id
+    source: data/chain/tokens.parquet (AppraisalOracle state)
+    properties:
+      appraisal_id:   { type: string }
+      sha256:         { type: string }
+      fair_value_eur: { type: double }
+      as_of_month:    { type: int }
+
+onchain_link_types:
+  tokenizes: { from: PropertyToken, to: Asset, cardinality: one-to-one }
+  deedOf:    { from: Asset, to: PropertyTransaction, cardinality: one-to-one,
+               derivation: shared official listing id }
+  valuedBy:  { from: PropertyToken, to: Appraisal, cardinality: many-to-one,
+               derivation: latest AppraisalPosted event per token }
