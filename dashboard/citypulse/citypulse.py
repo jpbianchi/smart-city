@@ -15,7 +15,7 @@ import reflex as rx
 from citypulse import charts
 from citypulse.data import eaqi_band, load_market, load_snapshot
 from smartcity.config import GOLD_DIR, zones
-from citypulse.ui import BORDER, CARD_BG, INK, INK_2, MUTED, PAGE_BG, STATUS, card, kpi_tile, navbar, panel
+from citypulse.ui import BORDER, CARD_BG, INK, INK_2, MUTED, PAGE_BG, PAGE_GRADIENT, STATUS, card, kpi_tile, navbar, panel
 
 
 
@@ -239,7 +239,7 @@ def ontology() -> rx.Component:
                     rx.data_table(data=State.manifest_rows, columns=["object type", "count"]),
                     rx.heading("Link types", size="3", color=INK, margin_top="16px", margin_bottom="8px"),
                     rx.data_table(data=State.link_rows, columns=["link", "signature", "count"]),
-                    flex="1",
+                    flex="1", tone="orange",
                 ),
                 panel(
                     rx.heading("Entity lookup", size="3", color=INK, margin_bottom="8px"),
@@ -254,7 +254,7 @@ def ontology() -> rx.Component:
                     rx.text(State.entity_title, size="2", weight="bold", color=INK, margin_top="8px"),
                     rx.foreach(State.entity_links, lambda l: rx.text(l, size="1", color=INK_2)),
                     rx.data_table(data=State.entity_rows, columns=["property", "value"]),
-                    flex="1",
+                    flex="1", tone="violet",
                 ),
                 spacing="3", width="100%", align="start",
             ),
@@ -276,11 +276,11 @@ def ontology() -> rx.Component:
                     rx.box(rx.plotly(data=State.fig_zone_history, width="100%"), flex="1"),
                     spacing="3", width="100%", align="start", margin_top="10px",
                 ),
-                width="100%",
+                width="100%", tone="aqua",
             ),
             spacing="3", width="100%", max_width="1200px", margin="0 auto", padding="0 20px 40px",
         ),
-        background_color=PAGE_BG, min_height="100vh",
+        background=PAGE_GRADIENT, background_attachment="fixed", min_height="100vh",
     )
 
 
@@ -327,7 +327,7 @@ def appraise_page() -> rx.Component:
                             spacing="1", align="start",
                         ),
                     ),
-                    flex="1",
+                    flex="1", tone="magenta",
                 ),
                 panel(
                     rx.text("Median €/m² by zone — apartments, last 2 years", size="2", color=INK_2, margin_bottom="8px"),
@@ -339,7 +339,7 @@ def appraise_page() -> rx.Component:
             ),
             spacing="3", width="100%", max_width="1200px", margin="0 auto", padding="0 20px 40px",
         ),
-        background_color=PAGE_BG, min_height="100vh",
+        background=PAGE_GRADIENT, background_attachment="fixed", min_height="100vh",
     )
 
 

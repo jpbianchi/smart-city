@@ -7,5 +7,22 @@
 
 /* keep overscroll / short pages on the page tone (matches ui.PAGE_BG) */
 html, body {
-  background-color: #e8edf2;
+  background-color: #0a1729;
+}
+
+/* the navbar band is 100vw wide; never let it add a horizontal scrollbar */
+body {
+  overflow-x: hidden;
+}
+
+/* tinted table headers (Radix tables and the data_table grids) */
+.rt-TableHeader .rt-TableColumnHeaderCell {
+  background-color: #eef4fb;
+}
+.gridjs-th {
+  background-color: #eef4fb !important;
+  color: #0d366b !important;
+}
+.gridjs-wrapper {
+  border-radius: 8px;
 }
