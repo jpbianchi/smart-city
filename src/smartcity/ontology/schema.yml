@@ -155,6 +155,11 @@ link_types:
 # On-chain layer — hydrated from the chain indexer (smartcity.tokenization),
 # present once properties have been tokenized. The chain is one more source:
 # its state lands in data/chain/*.parquet and becomes objects like any other.
+#
+# Rule: the chain is the SYSTEM OF RECORD for ownership and trades; these
+# objects are a derived READ MODEL rebuilt from contract logs. They are never
+# edited, and nothing writes back from the ontology to the chain. Every
+# market object carries block + tx provenance.
 # ---------------------------------------------------------------------------
 
 onchain_object_types:
@@ -199,9 +204,65 @@ onchain_object_types:
       fair_value_eur: { type: double }
       as_of_month:    { type: int }
 
+  Party:
+    description: A wallet that holds or trades shares (registry, investors).
+    primary_key: party_id
+    title_property: label
+    source: data/chain/parties.parquet
+    properties:
+      party_id: { type: string, description: "party:<address>" }
+      address:  { type: string }
+      label:    { type: string }
+      role:     { type: string, description: registry | oracle | investor | contract | external }
+
+  Holding:
+    description: A party's share balance in one property token (from TransferSingle logs).
+    primary_key: holding_id
+    source: data/chain/holdings.parquet
+    properties:
+      holding_id: { type: string }
+      shares:     { type: int }
+      pct:        { type: double, description: "% of the 1,000 shares" }
+
+  ShareOffer:
+    description: A fixed-price marketplace listing of shares.
+    primary_key: offer_id
+    source: data/chain/offers.parquet
+    properties:
+      offer_id:            { type: string }
+      amount_listed:       { type: int }
+      amount_remaining:    { type: int }
+      price_per_share_eur: { type: double }
+      status:              { type: string, description: open | filled | cancelled | closed }
+      block:               { type: int }
+      tx:                  { type: string }
+
+  ShareTrade:
+    description: An atomic settlement — shares for EURd in one transaction (OfferFilled).
+    primary_key: trade_id
+    source: data/chain/trades.parquet
+    properties:
+      trade_id:                 { type: string, description: "trade:<tx>:<logIndex>" }
+      shares:                   { type: int }
+      price_per_share_eur:      { type: double }
+      value_eur:                { type: double }
+      premium_vs_appraisal_pct: { type: double, description: price vs oracle fair value per share }
+      at:                       { type: timestamp }
+      block:                    { type: int }
+      tx:                       { type: string }
+
 onchain_link_types:
   tokenizes: { from: PropertyToken, to: Asset, cardinality: one-to-one }
   deedOf:    { from: Asset, to: PropertyTransaction, cardinality: one-to-one,
                derivation: shared official listing id }
   valuedBy:  { from: PropertyToken, to: Appraisal, cardinality: many-to-one,
                derivation: latest AppraisalPosted event per token }
+  holds:     { from: Party, to: Holding, cardinality: one-to-many }
+  holdingOf: { from: Holding, to: PropertyToken, cardinality: many-to-one }
+  offers:    { from: Party, to: ShareOffer, cardinality: one-to-many }
+  offerFor:  { from: ShareOffer, to: PropertyToken, cardinality: many-to-one }
+  buyer:     { from: ShareTrade, to: Party, cardinality: many-to-one }
+  seller:    { from: ShareTrade, to: Party, cardinality: many-to-one,
+               derivation: seller of the filled offer }
+  fills:     { from: ShareTrade, to: ShareOffer, cardinality: many-to-one }
+  tradeOf:   { from: ShareTrade, to: PropertyToken, cardinality: many-to-one }

@@ -79,8 +79,10 @@ class State(rx.State):
 
         m = snap["manifest"].get("counts", {})
         object_types = ["Zone", "PropertyTransaction", "Amenity", "TrafficSensor",
-                        "BikeStation", "AirQualitySensor", "Observation"]
-        self.manifest_rows = [[t, f"{m.get(t, 0):,}"] for t in object_types]
+                        "BikeStation", "AirQualitySensor", "Observation",
+                        "Asset", "PropertyToken", "Appraisal",
+                        "Party", "Holding", "ShareOffer", "ShareTrade"]
+        self.manifest_rows = [[t, f"{m[t]:,}"] for t in object_types if t in m]
         self.link_rows = [
             ["locatedIn", "BikeStation → Zone", f"{m.get('locatedIn', 0):,}"],
             ["monitors", "AirQualitySensor → Zone", f"{m.get('monitors', 0):,}"],
@@ -89,6 +91,22 @@ class State(rx.State):
             ["nearestStation", "PropertyTransaction → Amenity", f"{m.get('nearestStation', 0):,}"],
             ["amenityIn", "Amenity → Zone", f"{m.get('amenityIn', 0):,}"],
             ["monitorsRoad", "TrafficSensor → Zone", f"{m.get('monitorsRoad', 0):,}"],
+        ] + [
+            [name, sig, f"{m[name]:,}"]
+            for name, sig in (
+                ("tokenizes", "PropertyToken → Asset"),
+                ("deedOf", "Asset → PropertyTransaction"),
+                ("valuedBy", "PropertyToken → Appraisal"),
+                ("holds", "Party → Holding"),
+                ("holdingOf", "Holding → PropertyToken"),
+                ("offers", "Party → ShareOffer"),
+                ("offerFor", "ShareOffer → PropertyToken"),
+                ("buyer", "ShareTrade → Party"),
+                ("seller", "ShareTrade → Party"),
+                ("fills", "ShareTrade → ShareOffer"),
+                ("tradeOf", "ShareTrade → PropertyToken"),
+            )
+            if name in m
         ]
         self.zone_names = sorted(z["name"] for z in zones())
         self.select_zone(self.selected_zone)
@@ -211,7 +229,7 @@ class State(rx.State):
             self.entity_rows, self.entity_links = [], []
             return
         otype = obj.pop("__type__")
-        title = obj.get("name", self.entity_input)
+        title = obj.get("name") or obj.get("label") or obj.get("address") or self.entity_input
         self.entity_title = f"{title}  ·  {otype}"
         self.entity_rows = [[k, str(v)] for k, v in obj.items() if k not in ("name",)]
         links: list[str] = []

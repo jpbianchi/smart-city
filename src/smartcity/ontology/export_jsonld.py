@@ -92,6 +92,23 @@ def export() -> int:
                      "sosa:resultTime": o.observed_at.isoformat()})
         )
 
+    # on-chain market: parties and share trades (present once tokenized)
+    if (objects / "share_trade.parquet").exists():
+        parties = pd.read_parquet(objects / "party.parquet")
+        trades = pd.read_parquet(objects / "share_trade.parquet")
+        for _, p in parties.iterrows():
+            graph.append(_node(p.party_id, "schema:Organization", p.label,
+                               **{"city:walletAddress": p.address, "city:role": p.role}))
+        for _, t in trades.iterrows():
+            graph.append(_node(
+                t.trade_id, "schema:BuyAction",
+                **{"schema:agent": {"@id": f"city:{t.buyer_party_id}"},
+                   "schema:seller": {"@id": f"city:{t.seller_party_id}"},
+                   "schema:object": {"@id": f"city:{t.token_id}"},
+                   "schema:price": float(t.value_eur), "schema:priceCurrency": "EUR",
+                   "schema:endTime": t["at"].isoformat(),
+                   "city:shares": int(t.shares), "city:txHash": t.tx, "city:block": int(t.block)}))
+
     doc = {"@context": CONTEXT, "@graph": graph}
     out = ONTOLOGY_DIR / "city_graph.jsonld"
     with open(out, "w") as f:

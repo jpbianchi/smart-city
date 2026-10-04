@@ -9,10 +9,15 @@ Reads contract state + event logs from the chain and writes:
                              implied market cap, trade stats
   data/chain/events.parquet  human-readable event feed (mints, issuances,
                              trades, appraisals) with tx hashes
+  data/chain/parties.parquet   every address that held or traded shares
+  data/chain/holdings.parquet  (party, token) share balances > 0
+  data/chain/offers.parquet    one row per marketplace offer, with status
+  data/chain/trades.parquet    one row per filled trade, with buyer/seller
 
 The ontology build consumes these to materialize the Asset / PropertyToken /
-Appraisal objects — on-chain state becomes ontology objects, same as any
-other ingested source.
+Appraisal / Party / Holding / ShareOffer / ShareTrade objects. The chain is
+the system of record; these tables (and the ontology built from them) are a
+derived read model, rebuilt from logs — never edited.
 """
 from __future__ import annotations
 
@@ -55,6 +60,7 @@ def build_index() -> tuple[pd.DataFrame, pd.DataFrame]:
     appraisals = fetch(oracle, "AppraisalPosted")
     offers_created = fetch(market, "OfferCreated")
     fills = fetch(market, "OfferFilled")
+    cancels = {e["args"]["offerId"] for e in fetch(market, "OfferCancelled")}
 
     block_ts: dict[int, datetime] = {}
 
@@ -65,6 +71,8 @@ def build_index() -> tuple[pd.DataFrame, pd.DataFrame]:
 
     # ---- tokens table ---------------------------------------------------------
     rows = []
+    raw_holdings: list[tuple[str, int, int, int]] = []  # (address, token_id, shares, supply)
+    fair_per_share: dict[int, float] = {}
     for e in minted:
         token_id = e["args"]["tokenId"]
         prop = deed.functions.properties(token_id).call()
@@ -80,10 +88,12 @@ def build_index() -> tuple[pd.DataFrame, pd.DataFrame]:
                 holders[a["from"]] = holders.get(a["from"], 0) - a["value"]
             if a["to"] != "0x" + "0" * 40:
                 holders[a["to"]] = holders.get(a["to"], 0) + a["value"]
+        raw_holdings += [(addr, token_id, n, supply) for addr, n in holders.items() if n > 0]
         holders = {name_of(k): v for k, v in holders.items() if v > 0}
 
         app = oracle.functions.latest(token_id).call()
         doc_sha, fair_cents, fingerprint, as_of, posted_at = app
+        fair_per_share[token_id] = fair_cents / 100 / supply if supply else 0.0
         prop_fills = [f for f in fills if f["args"]["propertyId"] == token_id]
         last_price = None
         for f in sorted(prop_fills, key=lambda f: f["blockNumber"]):
@@ -149,9 +159,66 @@ def build_index() -> tuple[pd.DataFrame, pd.DataFrame]:
             name_of(e["args"]["buyer"]))
     events = pd.DataFrame(feed).sort_values(["block", "kind"], ascending=[False, True]).reset_index(drop=True)
 
+    # ---- structured tables for the ontology ----------------------------------------
+    role_of = {v["address"]: role.split("_")[0] for role, v in dep["accounts"].items()}
+    role_of.update({addr: "contract" for addr in dep["contracts"].values()})
+    party_id = lambda a: f"party:{a}"
+
+    holdings = pd.DataFrame([
+        {"holding_id": f"holding:{addr}:{hex(tid)}", "party_id": party_id(addr), "token_id": hex(tid),
+         "shares": n, "pct": round(100 * n / supply, 2)}
+        for addr, tid, n, supply in raw_holdings
+    ])
+
+    offers_state = [market.functions.offers(i).call() for i in range(market.functions.offerCount().call())]
+    offer_rows = []
+    for e in offers_created:
+        a = e["args"]
+        seller, prop_id, remaining, price_cents, is_open = offers_state[a["offerId"]]
+        status = ("cancelled" if a["offerId"] in cancels
+                  else "filled" if remaining == 0
+                  else "open" if is_open else "closed")
+        offer_rows.append({
+            "offer_id": f"offer:{a['offerId']}", "token_id": hex(prop_id),
+            "seller_party_id": party_id(seller), "amount_listed": a["amount"],
+            "amount_remaining": remaining, "price_per_share_eur": price_cents / 100,
+            "status": status, "block": e["blockNumber"], "at": ts(e["blockNumber"]),
+            "tx": e["transactionHash"].to_0x_hex(),
+        })
+    offers = pd.DataFrame(offer_rows)
+
+    trade_rows = []
+    for e in fills:
+        a = e["args"]
+        seller = offers_state[a["offerId"]][0]
+        px = a["paidEurCents"] / 100 / a["amount"]
+        fair = fair_per_share.get(a["propertyId"]) or None
+        trade_rows.append({
+            "trade_id": f"trade:{e['transactionHash'].to_0x_hex()}:{e['logIndex']}",
+            "offer_id": f"offer:{a['offerId']}", "token_id": hex(a["propertyId"]),
+            "buyer_party_id": party_id(a["buyer"]), "seller_party_id": party_id(seller),
+            "shares": a["amount"], "price_per_share_eur": round(px, 2),
+            "value_eur": a["paidEurCents"] / 100,
+            "premium_vs_appraisal_pct": None if fair is None else round(100 * (px / fair - 1), 2),
+            "block": e["blockNumber"], "at": ts(e["blockNumber"]),
+            "tx": e["transactionHash"].to_0x_hex(),
+        })
+    trades = pd.DataFrame(trade_rows)
+
+    addrs = set(addr for addr, *_ in raw_holdings)
+    addrs |= set(o[0] for o in offers_state) | set(e["args"]["buyer"] for e in fills)
+    parties = pd.DataFrame([
+        {"party_id": party_id(a), "address": a, "label": name_of(a), "role": role_of.get(a, "external")}
+        for a in sorted(addrs)
+    ])
+
     CHAIN_DIR.mkdir(parents=True, exist_ok=True)
     tokens.to_parquet(CHAIN_DIR / "tokens.parquet", index=False)
     events.to_parquet(CHAIN_DIR / "events.parquet", index=False)
+    parties.to_parquet(CHAIN_DIR / "parties.parquet", index=False)
+    holdings.to_parquet(CHAIN_DIR / "holdings.parquet", index=False)
+    offers.to_parquet(CHAIN_DIR / "offers.parquet", index=False)
+    trades.to_parquet(CHAIN_DIR / "trades.parquet", index=False)
     return tokens, events
 
 
@@ -159,6 +226,8 @@ def main() -> None:
     tokens, events = build_index()
     print(f"data/chain/tokens.parquet: {len(tokens)} tokenized properties")
     print(f"data/chain/events.parquet: {len(events)} events")
+    for name in ("parties", "holdings", "offers", "trades"):
+        print(f"data/chain/{name}.parquet: {len(pd.read_parquet(CHAIN_DIR / f'{name}.parquet'))} rows")
     if not tokens.empty:
         t = tokens.iloc[0]
         print(f"sample: {t['chain_address_label']} · {t['n_holders']} holders · "

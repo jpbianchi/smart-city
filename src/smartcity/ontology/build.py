@@ -216,6 +216,34 @@ def build() -> dict:
             "links", "valued_by",
         )
 
+        # ---- market activity: who holds what, who offered, who traded ------------
+        chain_dir = chain_tokens.parent
+        parties = pd.read_parquet(chain_dir / "parties.parquet")
+        holdings = pd.read_parquet(chain_dir / "holdings.parquet")
+        offers = pd.read_parquet(chain_dir / "offers.parquet")
+        trades = pd.read_parquet(chain_dir / "trades.parquet")
+
+        counts["Party"] = _write(parties, "objects", "party")
+        counts["Holding"] = _write(holdings, "objects", "holding")
+        counts["ShareOffer"] = _write(offers, "objects", "share_offer")
+        counts["ShareTrade"] = _write(trades, "objects", "share_trade")
+
+        link_specs = {
+            "holds": ("holds", holdings, "party_id", "holding_id"),
+            "holdingOf": ("holding_of", holdings, "holding_id", "token_id"),
+            "offers": ("offers", offers, "seller_party_id", "offer_id"),
+            "offerFor": ("offer_for", offers, "offer_id", "token_id"),
+            "buyer": ("buyer", trades, "trade_id", "buyer_party_id"),
+            "seller": ("seller", trades, "trade_id", "seller_party_id"),
+            "fills": ("fills", trades, "trade_id", "offer_id"),
+            "tradeOf": ("trade_of", trades, "trade_id", "token_id"),
+        }
+        for link, (fname, df, src, dst) in link_specs.items():
+            counts[link] = _write(
+                pd.DataFrame({"from_id": df[src].to_numpy(), "to_id": df[dst].to_numpy()}),
+                "links", fname,
+            )
+
     manifest = {
         "built_at": datetime.now(timezone.utc).isoformat(),
         "schema": str(SCHEMA_PATH.name),

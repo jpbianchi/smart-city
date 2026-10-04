@@ -27,6 +27,10 @@ OBJECT_FILES = {
     "Asset": ("asset", "asset_id"),
     "PropertyToken": ("property_token", "token_id"),
     "Appraisal": ("appraisal", "appraisal_id"),
+    "Party": ("party", "party_id"),
+    "Holding": ("holding", "holding_id"),
+    "ShareOffer": ("share_offer", "offer_id"),
+    "ShareTrade": ("share_trade", "trade_id"),
 }
 LINK_FILES = {
     "locatedIn": "located_in",
@@ -39,6 +43,14 @@ LINK_FILES = {
     "tokenizes": "tokenizes",
     "deedOf": "deed_of",
     "valuedBy": "valued_by",
+    "holds": "holds",
+    "holdingOf": "holding_of",
+    "offers": "offers",
+    "offerFor": "offer_for",
+    "buyer": "buyer",
+    "seller": "seller",
+    "fills": "fills",
+    "tradeOf": "trade_of",
 }
 
 
@@ -150,6 +162,66 @@ class Ontology:
             "n_recent_sales": len(tx),
             "median_price_m2": float(tx["price_m2"].median()) if not tx.empty else None,
         }
+
+    # -- on-chain traversals ------------------------------------------------------
+    def _one(self, link_type: str, from_id: str) -> str | None:
+        rows = self.linked_to(link_type, from_id)
+        return None if rows.empty else rows.iloc[0]["to_id"]
+
+    def _label(self, party_id: str) -> str:
+        p = self.get(party_id)
+        return p["label"] if p else party_id
+
+    def token_lineage(self, token_id: str) -> dict:
+        """Full provenance of one tokenized property, by following links only:
+        DVF sale -> appraisal -> asset -> token -> offers -> trades (with parties)."""
+        token = self.get(token_id)
+        asset_id = self._one("tokenizes", token_id)
+        sale_id = self._one("deedOf", asset_id) if asset_id else None
+        appraisal_id = self._one("valuedBy", token_id)
+        offer_ids = self.linked_from("offerFor", token_id)["from_id"]
+        trade_ids = self.linked_from("tradeOf", token_id)["from_id"]
+        offers = self.objects["ShareOffer"].loc[offer_ids] if not offer_ids.empty else pd.DataFrame()
+        trades = self.objects["ShareTrade"].loc[trade_ids].sort_values("block") if not trade_ids.empty else pd.DataFrame()
+        holders = self.linked_from("holdingOf", token_id)["from_id"]
+        return {
+            "token": token,
+            "asset": self.get(asset_id) if asset_id else None,
+            "dvf_sale": self.get(sale_id) if sale_id else None,
+            "zone": self._one("transactionIn", sale_id) if sale_id else None,
+            "appraisal": self.get(appraisal_id) if appraisal_id else None,
+            "offers": [
+                {**o, "seller": self._label(o["seller_party_id"])}
+                for o in offers.to_dict("records")
+            ],
+            "trades": [
+                {**t, "buyer": self._label(t["buyer_party_id"]), "seller": self._label(t["seller_party_id"])}
+                for t in trades.to_dict("records")
+            ],
+            "cap_table": [
+                {"holder": self._label(h["party_id"]), "shares": int(h["shares"]), "pct": float(h["pct"])}
+                for h in self.objects["Holding"].loc[holders].sort_values("shares", ascending=False).to_dict("records")
+            ] if not holders.empty else [],
+        }
+
+    def party_exposure(self, party_id: str) -> pd.DataFrame:
+        """What a party owns, where, and what it is worth at the oracle's fair value:
+        Party -holds-> Holding -holdingOf-> Token -tokenizes-> Asset -deedOf->
+        PropertyTransaction -transactionIn-> Zone, and Token -valuedBy-> Appraisal."""
+        hold_ids = self.linked_to("holds", party_id)["to_id"]
+        if hold_ids.empty:
+            return pd.DataFrame()
+        h = self.objects["Holding"].loc[hold_ids][["holding_id", "token_id", "shares", "pct"]]
+        h = h.merge(self.links["tokenizes"].rename(columns={"from_id": "token_id", "to_id": "asset_id"}), on="token_id")
+        h = h.merge(self.links["deedOf"].rename(columns={"from_id": "asset_id", "to_id": "tx_id"}), on="asset_id")
+        h = h.merge(self.links["valuedBy"].rename(columns={"from_id": "token_id", "to_id": "appraisal_id"}), on="token_id")
+        sales = self.objects["PropertyTransaction"][["tx_id", "address", "postal_code", "zone"]].reset_index(drop=True)
+        apps = self.objects["Appraisal"][["appraisal_id", "fair_value_eur"]].reset_index(drop=True)
+        h = h.merge(sales, on="tx_id").merge(apps, on="appraisal_id")
+        h["exposure_eur"] = (h["fair_value_eur"] * h["pct"] / 100).round(0)
+        return h.sort_values("exposure_eur", ascending=False)[
+            ["address", "postal_code", "zone", "shares", "pct", "fair_value_eur", "exposure_eur", "token_id"]
+        ].reset_index(drop=True)
 
 
 if __name__ == "__main__":
