@@ -1,24 +1,22 @@
 """CityPulse — live smart-city dashboard over the ontology.
 
 Run from the dashboard/ directory:  reflex run
-Page 1 (/)          city map: live station telemetry x zone air quality
-Page 2 (/ontology)  ontology explorer: schema, zone traversals, entity lookup
+Page /           properties: valued inventory, map, sortable table, detail popup
+Page /sources    data-source catalog: provenance, coverage, per-sensor drill-down
+Page /ontology   ontology explorer: schema, zone traversals, entity lookup
+Page /appraise   appraise any property from ontology-derived features
 """
 from __future__ import annotations
 
+import pandas as pd
 import plotly.graph_objects as go
 import reflex as rx
 
 from citypulse import charts
 from citypulse.data import eaqi_band, load_market, load_snapshot
+from smartcity.config import GOLD_DIR, zones
+from citypulse.ui import BORDER, CARD_BG, INK, INK_2, MUTED, PAGE_BG, STATUS, card, kpi_tile, navbar, panel
 
-PAGE_BG = "#f9f9f7"
-CARD_BG = "#fcfcfb"
-INK = "#0b0b0b"
-INK_2 = "#52514e"
-MUTED = "#898781"
-BORDER = "1px solid rgba(11,11,11,0.10)"
-STATUS = {"good": "#0ca30c", "warning": "#fab219", "serious": "#ec835a", "critical": "#d03b3b"}
 
 
 class State(rx.State):
@@ -44,7 +42,7 @@ class State(rx.State):
     zone_summary: str = ""
     zone_air: str = ""
     station_rows: list[list] = []
-    entity_input: str = "aq:montmartre"
+    entity_input: str = "zone:montmartre"
     entity_title: str = ""
     entity_rows: list[list] = []
     entity_links: list[str] = []
@@ -78,53 +76,61 @@ class State(rx.State):
         self.eaqi_color = STATUS[role]
         self.last_report = k["last_report"]
 
-        center = {"lat": 48.8566, "lon": 2.3522}
-        self.fig_map = charts.build_city_map(snap["stations"], snap["sensors"], center)
-        self.fig_zone_bar = charts.build_zone_bar(snap["zone_agg"])
 
         m = snap["manifest"].get("counts", {})
-        object_types = ["Zone", "BikeStation", "AirQualitySensor", "Observation"]
+        object_types = ["Zone", "PropertyTransaction", "Amenity", "TrafficSensor",
+                        "BikeStation", "AirQualitySensor", "Observation"]
         self.manifest_rows = [[t, f"{m.get(t, 0):,}"] for t in object_types]
         self.link_rows = [
             ["locatedIn", "BikeStation → Zone", f"{m.get('locatedIn', 0):,}"],
             ["monitors", "AirQualitySensor → Zone", f"{m.get('monitors', 0):,}"],
             ["observedBy", "Observation → entity", f"{m.get('observedBy', 0):,}"],
+            ["transactionIn", "PropertyTransaction → Zone", f"{m.get('transactionIn', 0):,}"],
+            ["nearestStation", "PropertyTransaction → Amenity", f"{m.get('nearestStation', 0):,}"],
+            ["amenityIn", "Amenity → Zone", f"{m.get('amenityIn', 0):,}"],
+            ["monitorsRoad", "TrafficSensor → Zone", f"{m.get('monitorsRoad', 0):,}"],
         ]
-        self.zone_names = sorted(snap["zone_agg"]["name"].tolist())
+        self.zone_names = sorted(z["name"] for z in zones())
         self.select_zone(self.selected_zone)
 
     def select_zone(self, name: str):
         self.selected_zone = name
-        snap = self._snapshot()
-        row = snap["zone_agg"][snap["zone_agg"]["name"] == name]
-        if row.empty:
+        zone = next((z for z in zones() if z["name"] == name), None)
+        if zone is None:
             return
-        r = row.iloc[0]
-        slug = r["zone"]
+        slug, zid = zone["slug"], f"zone:{zone['slug']}"
+        onto = self._snapshot()["onto"]
+        ctx = onto.zone_context(zid)
+        sales = onto.transactions_in_zone(zid, since_year=2025)
+        apts = sales[sales["property_type"] == "Appartement"]
+        amen = onto.objects["Amenity"]
+        amen = amen.loc[amen.index.intersection(onto.linked_from("amenityIn", zid)["from_id"])]
+        kinds = amen["kind"].value_counts()
         self.zone_summary = (
-            f"{int(r['n_stations'])} stations · {int(r['bikes'])} bikes available"
-            f" · capacity {int(r['capacity'])}"
-        )
-        if r.notna().get("eaqi", False):
-            label, _ = eaqi_band(r["eaqi"])
-            self.zone_air = (
-                f"EAQI {r['eaqi']:.0f} ({label}) · PM2.5 {r['pm2_5']:.1f} µg/m³"
-                f" · NO₂ {r['no2']:.1f} µg/m³"
-            )
+            f"{len(sales):,} sales in 2025 · median "
+            f"{(apts['price_m2'].median() if not apts.empty else float('nan')):,.0f} €/m² (apartments) · "
+            f"{ctx['n_road_sensors']} road-traffic sensors · "
+            f"{kinds.get('subway_station', 0)} metro · {kinds.get('train_station', 0)} train/RER · "
+            f"{kinds.get('school', 0)} schools · {kinds.get('park', 0)} parks"
+        ).replace(",", " ")
+        sensor = ctx["sensor"]
+        if sensor and sensor.get("eaqi") is not None:
+            label, _ = eaqi_band(sensor["eaqi"])
+            self.zone_air = (f"Air quality: EAQI {sensor['eaqi']:.0f} ({label}) · PM2.5 "
+                             f"{sensor['pm2_5']:.1f} µg/m³ · NO₂ {sensor['no2']:.1f} µg/m³")
         else:
-            self.zone_air = "no air-quality reading yet"
-        stations = snap["onto"].stations_in_zone(f"zone:{slug}")
-        top = stations.sort_values("bikes_available", ascending=False).head(12)
+            self.zone_air = "Air quality: no reading yet"
+        recent = sales.sort_values("sold_on", ascending=False).head(12)
         self.station_rows = [
-            [
-                s["name"],
-                int(s["bikes_available"]) if s.notna()["bikes_available"] else 0,
-                int(s["docks_available"]) if s.notna()["docks_available"] else 0,
-                int(s["capacity"]) if s.notna()["capacity"] else 0,
-            ]
-            for _, s in top.iterrows()
+            [s["address"], pd.to_datetime(s["sold_on"]).strftime("%d %b %Y"),
+             f"{s['surface_m2']:.0f} m²", f"{s['price_eur']:,.0f} €".replace(",", " "),
+             f"{s['price_m2']:,.0f}".replace(",", " ")]
+            for _, s in recent.iterrows()
         ]
-        self.fig_zone_history = charts.build_zone_history(snap["zone_hourly"], slug, name)
+        traffic = pd.read_parquet(GOLD_DIR / "zone_traffic_hourly")
+        traffic = traffic[traffic["zone"] == slug].rename(columns={"hour": "observed_at"}).sort_values("observed_at")
+        self.fig_zone_history = charts.build_series(
+            traffic, "avg_flow_vph", f"Road traffic — avg vehicles/hour per sensor, {name}", "veh/h")
 
     def load_valuation(self):
         self.load()
@@ -183,7 +189,7 @@ class State(rx.State):
             f" · doc {doc['sha256'][:12]}…"
         )
         self.val_features = (
-            f"{f['zone']} · metro {f['nearest_subway']} at {f['dist_subway_m']:.0f}m · "
+            f"{f['zone']} · metro {f.get('subway_name') or '–'} at {f['dist_subway_m']:.0f}m · "
             f"{f['n_schools_500m']} schools / {f['n_parks_500m']} parks / "
             f"{f['n_supermarkets_500m']} shops within 500m · "
             f"traffic occ. {f['zone_traffic_occupancy']}% · EAQI {f['zone_eaqi']}"
@@ -210,99 +216,37 @@ class State(rx.State):
         self.entity_rows = [[k, str(v)] for k, v in obj.items() if k not in ("name",)]
         links: list[str] = []
         oid = self.entity_input.strip()
-        for ltype in ("locatedIn", "monitors"):
+        for ltype in onto.links:
             out = onto.linked_to(ltype, oid)
-            for _, lrow in out.iterrows():
-                links.append(f"{ltype} → {lrow['to_id']}")
-        n_obs = len(onto.linked_from("observedBy", oid))
-        if n_obs:
-            links.append(f"observedBy ← {n_obs} observations")
+            for _, lrow in out.head(5).iterrows():
+                extra = f" ({lrow['dist_m']:.0f} m)" if "dist_m" in lrow and pd.notna(lrow["dist_m"]) else ""
+                links.append(f"{ltype} → {lrow['to_id']}{extra}")
+            n_in = len(onto.linked_from(ltype, oid))
+            if n_in:
+                links.append(f"{ltype} ← {n_in:,} objects")
         self.entity_links = links or ["no links"]
 
 
 # ---------------------------------------------------------------------------- UI
-def kpi_tile(label: str, value, sub=None, accent: str | None = None) -> rx.Component:
-    children = [
-        rx.text(label, size="1", color=MUTED, weight="medium"),
-        rx.heading(value, size="7", color=INK),
-    ]
-    if sub is not None:
-        dot = (
-            rx.box(width="8px", height="8px", border_radius="50%", background_color=accent)
-            if accent is not None
-            else rx.fragment()
-        )
-        children.append(rx.hstack(dot, rx.text(sub, size="1", color=INK_2), align="center", spacing="1"))
-    return rx.box(
-        rx.vstack(*children, spacing="1", align="start"),
-        background_color=CARD_BG, border=BORDER, border_radius="10px", padding="16px", flex="1",
-    )
-
-
-def card(*children, **kwargs) -> rx.Component:
-    return rx.box(*children, background_color=CARD_BG, border=BORDER, border_radius="10px", padding="16px", **kwargs)
-
-
-def navbar() -> rx.Component:
-    return rx.hstack(
-        rx.heading("CityPulse", size="5", color=INK),
-        rx.text("Paris · Vélib' + air quality, live", size="2", color=MUTED),
-        rx.spacer(),
-        rx.link("Map", href="/", color=INK_2),
-        rx.link("Ontology", href="/ontology", color=INK_2),
-        rx.link("Valuation", href="/valuation", color=INK_2),
-        rx.button("Refresh", on_click=State.load, size="1", variant="outline"),
-        align="center", spacing="4", width="100%", padding_y="12px",
-    )
-
-
-@rx.page(route="/", title="CityPulse — Paris", on_load=State.load)
-def index() -> rx.Component:
-    return rx.box(
-        rx.vstack(
-            navbar(),
-            rx.hstack(
-                kpi_tile("Stations renting", State.stations_online, sub=f"last report " + State.last_report),
-                kpi_tile("Bikes available now", State.bikes_available),
-                kpi_tile("Docks free now", State.docks_available),
-                kpi_tile("Air quality (EAQI)", State.eaqi_value, sub=State.eaqi_label, accent=State.eaqi_color),
-                spacing="3", width="100%",
-            ),
-            card(
-                rx.text("Live station fill × zone air quality", size="2", color=INK_2, margin_bottom="8px"),
-                rx.plotly(data=State.fig_map, width="100%"),
-                width="100%",
-            ),
-            card(
-                rx.text("Bikes available by zone", size="2", color=INK_2, margin_bottom="8px"),
-                rx.plotly(data=State.fig_zone_bar, width="100%"),
-                width="100%",
-            ),
-            spacing="3", width="100%", max_width="1200px", margin="0 auto", padding="0 20px 40px",
-        ),
-        background_color=PAGE_BG, min_height="100vh",
-    )
-
-
 @rx.page(route="/ontology", title="CityPulse — Ontology", on_load=State.load)
 def ontology() -> rx.Component:
     return rx.box(
         rx.vstack(
-            navbar(),
+            navbar(State.load),
             rx.hstack(
-                card(
+                panel(
                     rx.heading("Object types", size="3", color=INK, margin_bottom="8px"),
                     rx.data_table(data=State.manifest_rows, columns=["object type", "count"]),
                     rx.heading("Link types", size="3", color=INK, margin_top="16px", margin_bottom="8px"),
                     rx.data_table(data=State.link_rows, columns=["link", "signature", "count"]),
                     flex="1",
                 ),
-                card(
+                panel(
                     rx.heading("Entity lookup", size="3", color=INK, margin_bottom="8px"),
                     rx.hstack(
                         rx.input(
                             value=State.entity_input, on_change=State.set_entity_input,
-                            placeholder="station:16107 · aq:montmartre · zone:bercy", width="100%",
+                            placeholder="zone:montmartre · aq:bercy · traffic:6998 · tx:… · poi:node/…", width="100%",
                         ),
                         rx.button("Resolve", on_click=State.lookup_entity, size="2"),
                         width="100%",
@@ -314,9 +258,10 @@ def ontology() -> rx.Component:
                 ),
                 spacing="3", width="100%", align="start",
             ),
-            card(
+            panel(
                 rx.hstack(
                     rx.heading("Zone traversal", size="3", color=INK),
+                    rx.text("one zone → its sales, sensors and amenities, by following links", size="1", color=MUTED),
                     rx.select(State.zone_names, value=State.selected_zone, on_change=State.select_zone),
                     align="center", spacing="3",
                 ),
@@ -324,8 +269,8 @@ def ontology() -> rx.Component:
                 rx.text(State.zone_air, size="2", color=INK_2),
                 rx.hstack(
                     rx.box(
-                        rx.text("Top stations (locatedIn → this zone)", size="1", color=MUTED, margin_bottom="4px"),
-                        rx.data_table(data=State.station_rows, columns=["station", "bikes", "docks", "capacity"]),
+                        rx.text("Latest sales (transactionIn → this zone)", size="1", color=MUTED, margin_bottom="4px"),
+                        rx.data_table(data=State.station_rows, columns=["address", "sold", "size", "price", "€/m²"]),
                         flex="1",
                     ),
                     rx.box(rx.plotly(data=State.fig_zone_history, width="100%"), flex="1"),
@@ -339,13 +284,13 @@ def ontology() -> rx.Component:
     )
 
 
-@rx.page(route="/valuation", title="CityPulse — Valuation", on_load=State.load_valuation)
-def valuation() -> rx.Component:
+@rx.page(route="/appraise", title="CityPulse — Appraise", on_load=State.load_valuation)
+def appraise_page() -> rx.Component:
     return rx.box(
         rx.vstack(
-            navbar(),
+            navbar(State.load),
             rx.hstack(
-                card(
+                panel(
                     rx.heading("Appraise a property", size="3", color=INK, margin_bottom="4px"),
                     rx.text(
                         "Every input below becomes a walk in the city ontology: "
@@ -384,7 +329,7 @@ def valuation() -> rx.Component:
                     ),
                     flex="1",
                 ),
-                card(
+                panel(
                     rx.text("Median €/m² by zone — apartments, last 2 years", size="2", color=INK_2, margin_bottom="8px"),
                     rx.plotly(data=State.fig_market, width="100%"),
                     rx.plotly(data=State.fig_market_trend, width="100%"),
@@ -397,6 +342,8 @@ def valuation() -> rx.Component:
         background_color=PAGE_BG, min_height="100vh",
     )
 
+
+from citypulse import properties, sources_page  # noqa: E402,F401  (register pages)
 
 app = rx.App(
     style={"font_family": 'system-ui, -apple-system, "Segoe UI", sans-serif', "background": PAGE_BG},

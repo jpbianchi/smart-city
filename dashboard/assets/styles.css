@@ -4,3 +4,8 @@
 .js-plotly-plot svg.main-svg:not(:first-of-type) {
   background: transparent !important;
 }
+
+/* keep overscroll / short pages on the page tone (matches ui.PAGE_BG) */
+html, body {
+  background-color: #e8edf2;
+}

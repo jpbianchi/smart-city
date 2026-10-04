@@ -78,6 +78,23 @@ def load_snapshot() -> dict:
     }
 
 
+LISTINGS_PATH = PROJECT_ROOT / "data" / "valuation" / "listings.parquet"
+_listings_cache: dict = {}
+
+
+def load_listings(force: bool = False) -> pd.DataFrame:
+    """The valued property inventory, cached per file version."""
+    mtime = LISTINGS_PATH.stat().st_mtime
+    if force or _listings_cache.get("mtime") != mtime:
+        df = pd.read_parquet(LISTINGS_PATH)
+        zone_meta = {z["slug"]: z["name"] for z in zones()}
+        df["zone_name"] = df["zone"].map(zone_meta)
+        df["arr_num"] = df["postal_code"].astype(str).str[-2:].astype(int)
+        df.loc[df["postal_code"].astype(str) == "75116", "arr_num"] = 16
+        _listings_cache.update(mtime=mtime, df=df)
+    return _listings_cache["df"]
+
+
 def load_market() -> dict:
     """Zone-level market view for the valuation page."""
     market = pd.read_parquet(GOLD_DIR / "zone_market")
