@@ -7,18 +7,21 @@ algorithm never touches this file; adding a data source extends it.
 """
 from __future__ import annotations
 
-import math
-from datetime import datetime, timezone
+from functools import lru_cache
 
+import numpy as np
 import pandas as pd
 
-from smartcity.config import GOLD_DIR, haversine_km, nearest_zone
+from smartcity.config import GOLD_DIR, nearest_zone
 
 TARGET = "price_m2"
 NUMERIC_FEATURES = [
     "surface_m2",
     "rooms",
     "dist_subway_m",
+    "dist_train_m",
+    "dist_school_m",
+    "dist_park_m",
     "n_schools_500m",
     "n_parks_500m",
     "n_supermarkets_500m",
@@ -29,16 +32,55 @@ NUMERIC_FEATURES = [
 CATEGORICAL_FEATURES = ["zone", "property_type"]
 ALL_FEATURES = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 
+# amenity kind -> column prefix used in the gold feature matrix
+NEAREST_KINDS = {"subway_station": "subway", "train_station": "train",
+                 "school": "school", "park": "park"}
+COUNT_KINDS = {"school": "n_schools_500m", "park": "n_parks_500m",
+               "supermarket": "n_supermarkets_500m"}
+EARTH_KM = 6371.0
+
 
 def load_training_frame() -> pd.DataFrame:
     """The gold feature matrix, with rows a model can safely learn from."""
     df = pd.read_parquet(GOLD_DIR / "transaction_features")
     df = df.dropna(subset=[TARGET, "surface_m2", "zone", "property_type"])
     df["rooms"] = df["rooms"].fillna(0)
-    df["dist_subway_m"] = df["dist_subway_m"].fillna(df["dist_subway_m"].median())
-    for col in ("zone_traffic_occupancy", "zone_eaqi"):
-        df[col] = df[col].fillna(df[col].median())
+    for col in NUMERIC_FEATURES:
+        if df[col].isna().any():
+            df[col] = df[col].fillna(df[col].median())
     return df
+
+
+@lru_cache(maxsize=1)
+def latest_month_index() -> int:
+    """Most recent month covered by transaction data.
+
+    Appraisals are stated "as of" this month: a linear time trend must not be
+    extrapolated past the data it was fitted on.
+    """
+    df = pd.read_parquet(GOLD_DIR / "transaction_features", columns=["month_index"])
+    return int(df["month_index"].max())
+
+
+@lru_cache(maxsize=1)
+def _amenity_index():
+    from sklearn.neighbors import BallTree
+
+    amen = pd.read_parquet(GOLD_DIR / "amenities")
+    trees = {}
+    for kind in set(NEAREST_KINDS) | set(COUNT_KINDS):
+        sub = amen[amen["kind"] == kind].reset_index(drop=True)
+        if not sub.empty:
+            trees[kind] = (BallTree(np.radians(sub[["lat", "lon"]].to_numpy()), metric="haversine"), sub)
+    return trees
+
+
+@lru_cache(maxsize=1)
+def _zone_ambient() -> tuple[dict, dict]:
+    traffic = pd.read_parquet(GOLD_DIR / "zone_traffic_hourly")
+    zh = pd.read_parquet(GOLD_DIR / "zone_hourly")
+    return (traffic.groupby("zone")["avg_occupancy_pct"].mean().round(2).to_dict(),
+            zh.groupby("zone")["eaqi"].mean().round(1).to_dict())
 
 
 def build_query_features(lat: float, lon: float, surface_m2: float, rooms: int,
@@ -46,39 +88,25 @@ def build_query_features(lat: float, lon: float, surface_m2: float, rooms: int,
     """Assemble the same features for an arbitrary location at appraisal time.
 
     Mirrors the pipeline's geospatial derivations (nearest zone, nearest
-    subway, 500m amenity counts, zone ambient indicators) in pandas, against
-    the gold tables.
+    metro/train/school/park, 500m amenity counts, zone ambient indicators).
     """
     zone = nearest_zone(lat, lon)
+    point = np.radians([[lat, lon]])
+    feats: dict = {"lat": lat, "lon": lon, "zone": zone, "property_type": property_type,
+                   "surface_m2": float(surface_m2), "rooms": int(rooms)}
 
-    amen = pd.read_parquet(GOLD_DIR / "amenities")
-    d_km = amen.apply(lambda a: haversine_km(lat, lon, a["lat"], a["lon"]), axis=1)
-    amen = amen.assign(d_km=d_km)
-    subway = amen[amen["kind"] == "subway_station"]
-    nearest_subway = subway.loc[subway["d_km"].idxmin()] if not subway.empty else None
-    within = amen[amen["d_km"] <= 0.5]
+    for kind, (tree, sub) in _amenity_index().items():
+        if kind in NEAREST_KINDS:
+            short = NEAREST_KINDS[kind]
+            dist, idx = tree.query(point, k=1)
+            row = sub.iloc[int(idx[0, 0])]
+            feats[f"dist_{short}_m"] = round(float(dist[0, 0]) * EARTH_KM * 1000, 0)
+            feats[f"{short}_name"] = row["name"] or None
+        if kind in COUNT_KINDS:
+            feats[COUNT_KINDS[kind]] = int(tree.query_radius(point, r=0.5 / EARTH_KM, count_only=True)[0])
 
-    traffic = pd.read_parquet(GOLD_DIR / "zone_traffic_hourly")
-    ztraffic = traffic[traffic["zone"] == zone]["avg_occupancy_pct"].mean()
-    zh = pd.read_parquet(GOLD_DIR / "zone_hourly")
-    zeaqi = zh[zh["zone"] == zone]["eaqi"].mean()
-
-    now = datetime.now(timezone.utc)
-    month_index = (now.year - 2021) * 12 + (now.month - 1)
-
-    return {
-        "lat": lat,
-        "lon": lon,
-        "zone": zone,
-        "property_type": property_type,
-        "surface_m2": float(surface_m2),
-        "rooms": int(rooms),
-        "dist_subway_m": round(float(nearest_subway["d_km"]) * 1000, 0) if nearest_subway is not None else None,
-        "nearest_subway": None if nearest_subway is None else (nearest_subway["name"] or nearest_subway["osm_id"]),
-        "n_schools_500m": int((within["kind"] == "school").sum()),
-        "n_parks_500m": int((within["kind"] == "park").sum()),
-        "n_supermarkets_500m": int((within["kind"] == "supermarket").sum()),
-        "zone_traffic_occupancy": None if math.isnan(ztraffic) else round(float(ztraffic), 2),
-        "zone_eaqi": None if pd.isna(zeaqi) else round(float(zeaqi), 1),
-        "month_index": month_index,
-    }
+    traffic, eaqi = _zone_ambient()
+    feats["zone_traffic_occupancy"] = traffic.get(zone)
+    feats["zone_eaqi"] = eaqi.get(zone)
+    feats["month_index"] = latest_month_index()
+    return feats

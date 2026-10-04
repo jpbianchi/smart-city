@@ -81,6 +81,63 @@ def _neighbor_grid(df: DataFrame, cell_lat: float, cell_lon: float,
     )
 
 
+NEAREST_KINDS = {
+    "subway_station": "subway",
+    "train_station": "train",
+    "school": "school",
+    "park": "park",
+}
+
+
+def nearest_amenities(points: DataFrame, amen_pdf) -> DataFrame:
+    """Nearest amenity of each kind for every point: (id, name, distance in m).
+
+    Amenities are small (a few thousand rows), so one haversine BallTree per
+    kind is built on the driver, broadcast, and queried partition-by-partition
+    with mapInPandas — O(n log m) instead of an n x m cross join.
+    """
+    import numpy as np
+    import pandas as pd
+    from pyspark.sql.types import DoubleType, StringType, StructField, StructType
+    from sklearn.neighbors import BallTree
+
+    trees = {}
+    for kind in NEAREST_KINDS:
+        sub = amen_pdf[amen_pdf["kind"] == kind].reset_index(drop=True)
+        if not sub.empty:
+            tree = BallTree(np.radians(sub[["lat", "lon"]].to_numpy()), metric="haversine")
+            trees[kind] = (tree, sub["osm_id"].tolist(), sub["name"].fillna("").tolist())
+    bc = points.sparkSession.sparkContext.broadcast(trees)
+
+    fields = [StructField("tx_id", StringType())]
+    for short in NEAREST_KINDS.values():
+        fields += [
+            StructField(f"{short}_id", StringType()),
+            StructField(f"{short}_name", StringType()),
+            StructField(f"dist_{short}_m", DoubleType()),
+        ]
+    schema = StructType(fields)
+
+    def _query(batches):
+        local = bc.value
+        for pdf in batches:
+            out = pd.DataFrame({"tx_id": pdf["tx_id"]})
+            coords = np.radians(pdf[["lat", "lon"]].to_numpy())
+            for kind, short in NEAREST_KINDS.items():
+                if kind not in local or len(pdf) == 0:
+                    out[f"{short}_id"], out[f"{short}_name"], out[f"dist_{short}_m"] = None, None, np.nan
+                    continue
+                tree, ids, names = local[kind]
+                dist, idx = tree.query(coords, k=1)
+                idx = idx[:, 0]
+                out[f"{short}_id"] = [ids[i] for i in idx]
+                out[f"{short}_name"] = [names[i] or None for i in idx]
+                out[f"dist_{short}_m"] = np.round(dist[:, 0] * EARTH_KM * 1000, 0)
+            yield out
+
+    return points.mapInPandas(_query, schema=schema)
+
+
 def main() -> None:
     spark = get_spark("silver_to_gold")
     spark.sparkContext.setLogLevel("WARN")
@@ -184,21 +241,11 @@ def main() -> None:
     print(f"gold/zone_market: {zone_market.count()} zone-year-type rows")
 
     # --- valuation feature matrix ----------------------------------------------
-    # nearest subway: 349 stations -> full broadcast join is cheap enough
-    subway = amen_zone.where(F.col("kind") == "subway_station").select(
-        F.col("osm_id").alias("subway_id"),
-        F.col("lat").alias("s_lat"), F.col("lon").alias("s_lon"),
-    )
-    w_tx = Window.partitionBy("tx_id").orderBy("d_subway")
-    tx_subway = (
-        tx_zone.select("tx_id", "lat", "lon")
-        .crossJoin(F.broadcast(subway))
-        .withColumn("d_subway", _haversine_km(F.col("lat"), F.col("lon"),
-                                              F.col("s_lat"), F.col("s_lon")))
-        .withColumn("rn", F.row_number().over(w_tx))
-        .where("rn = 1")
-        .select("tx_id", "subway_id", F.round(F.col("d_subway") * 1000, 0).alias("dist_subway_m"))
-    )
+    # nearest metro / train / school / park, by name and distance
+    amen_pdf = amen_zone.where(F.col("kind").isin(*NEAREST_KINDS)).select(
+        "osm_id", "kind", "name", "lat", "lon"
+    ).toPandas()
+    tx_nearest = nearest_amenities(tx_zone.select("tx_id", "lat", "lon"), amen_pdf)
 
     # counts within 500m via 3x3 grid-cell join (cells ~500m)
     CELL_LAT, CELL_LON = 0.0045, 0.0068
@@ -230,10 +277,10 @@ def main() -> None:
     features = (
         tx_zone.select(
             "tx_id", "zone", "property_type", "surface_m2", "rooms", "price_eur",
-            "price_m2", "year", "sold_on", "lat", "lon", "postal_code",
+            "price_m2", "year", "sold_on", "lat", "lon", "postal_code", "address",
             F.months_between(F.col("sold_on"), F.lit("2021-01-01")).cast("int").alias("month_index"),
         )
-        .join(tx_subway, "tx_id", "left")
+        .join(tx_nearest, "tx_id", "left")
         .join(near_counts, "tx_id", "left")
         .join(zone_traffic_mean, "zone", "left")
         .join(zone_air_mean, "zone", "left")

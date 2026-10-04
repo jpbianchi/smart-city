@@ -160,12 +160,30 @@ def build_transactions(spark: SparkSession) -> None:
         F.col("id_parcelle"),
         F.col("longitude").cast("double").alias("lon"),
         F.col("latitude").cast("double").alias("lat"),
+        F.trim(F.regexp_replace(
+            F.concat_ws(
+                " ",
+                F.regexp_replace(F.coalesce(F.col("adresse_numero"), F.lit("")), r"\.0$", ""),
+                F.coalesce(F.col("adresse_suffixe"), F.lit("")),
+                F.initcap(F.lower(F.coalesce(F.col("adresse_nom_voie"), F.lit("")))),
+            ),
+            r"\s+", " ",
+        )).alias("address"),
+    )
+    dwellings = df.where(
+        (F.col("nature_mutation") == "Vente")
+        & F.col("property_type").isin("Appartement", "Maison")
+    )
+    # DVF repeats one mutation-level price on every unit of a block sale, so a
+    # per-unit EUR/m2 only exists for single-dwelling mutations.
+    single_unit = (
+        dwellings.groupBy("id_mutation").agg(F.count("*").alias("n_units"))
+        .where("n_units = 1").select("id_mutation")
     )
     clean = (
-        df.where(
-            (F.col("nature_mutation") == "Vente")
-            & F.col("property_type").isin("Appartement", "Maison")
-            & F.col("lat").isNotNull() & F.col("lon").isNotNull()
+        dwellings.join(single_unit, "id_mutation")
+        .where(
+            F.col("lat").isNotNull() & F.col("lon").isNotNull()
             & (F.col("surface_m2") >= 9) & (F.col("price_eur") >= 10_000)
         )
         .withColumn("price_m2", F.round(F.col("price_eur") / F.col("surface_m2"), 0))

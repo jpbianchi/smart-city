@@ -47,6 +47,10 @@ def main() -> None:
                "median_ape_pct": round(median_ape, 1), "n_test": len(test), "test_year": test_year}
     print("metrics:", metrics)
 
+    # metrics come from the held-out year; the shipped artifact learns from all of it
+    model = MODELS[args.model]()
+    model.fit(df)
+
     out_dir = VALUATION_DIR / args.model
     model.save(out_dir)
     fingerprint = hashlib.sha256(
@@ -57,7 +61,8 @@ def main() -> None:
         "trained_at": datetime.now(timezone.utc).isoformat(),
         "features": ALL_FEATURES,
         "target": TARGET,
-        "train_rows": len(train),
+        "train_rows": len(df),
+        "eval_train_rows": len(train),
         "metrics": metrics,
         "data_fingerprint": fingerprint,
     }

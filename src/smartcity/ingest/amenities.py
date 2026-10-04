@@ -24,6 +24,7 @@ HEADERS = {"User-Agent": "CityPulse/1.0 (smart-city portfolio project)"}
 
 QUERIES = {
     "subway_station": f'node["station"="subway"]({BBOX});',
+    "train_station": f'node["railway"="station"]["station"!="subway"]({BBOX});',
     "school": f'nwr["amenity"="school"]({BBOX});',
     "park": f'nwr["leisure"="park"]({BBOX});',
     "supermarket": f'nwr["shop"="supermarket"]({BBOX});',
