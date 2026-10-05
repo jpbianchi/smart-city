@@ -32,6 +32,7 @@ TONES = {
 }
 
 NAV = [
+    ("Doc", "/doc"),
     ("Properties", "/"),
     ("Tokens", "/tokens"),
     ("Data sources", "/sources"),
@@ -99,7 +100,7 @@ def _nav_link(label: str, href: str) -> rx.Component:
     )
 
 
-def navbar(refresh=None, subtitle: str = "Paris · property intelligence on live city data") -> rx.Component:
+def navbar(refresh=None, subtitle: str = "Paris properties tokenization with smart contracts based on live smart city data") -> rx.Component:
     items = [
         rx.center(rx.icon("building-2", size=18, color="white"), width="32px", height="32px",
                   border_radius="9px", background="linear-gradient(135deg, #1baf7a, #2a78d6)",

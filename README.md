@@ -1,4 +1,4 @@
-# CityPulse — property intelligence on a live smart-city ontology
+# CityPulse — Paris property tokenization on live smart-city data
 
 CityPulse values every home in Paris from what the city itself measures.
 Five real data sources — 1,750+ road-traffic induction loops, per-district
@@ -22,7 +22,9 @@ applications consume the graph.
 
 | Page | What it does |
 |---|---|
+| **Doc** | The project overview for a first-time visitor: the smart-city stack, the tokenization lifecycle, and what each page shows. |
 | **Properties** | Map + sortable table of 2,213 real Paris addresses with asking price, model fair value and value gap. Filter by zone, arrondissement, type, price band, rooms, and distance to school, metro, train/RER and park. Click any home for its **dossier**: value drivers in plain language, nearest school/metro/RER/park with walking times, live traffic and air quality for its zone, zone price trend, opportunity score breakdown, and bear/base/bull 3-year projections. |
+| **Tokens** | The block explorer: every tokenized property with its deed, share supply, last price and market value; cap tables; and the feed of mints, appraisals, offers and trades. |
 | **Data sources** | The data catalog: every feed with its provider, licence, cadence, coverage (records, zones, extent, freshness) and exactly which valuation features and ontology objects it feeds. Click any individual sensor to see its reading history. |
 | **Ontology** | Object and link counts, an entity resolver that follows every link type, and a zone traversal (sales, sensors, amenities, air quality, hourly traffic). |
 | **Appraise** | Price any surface/rooms/type in any zone, with the per-driver breakdown. |
@@ -155,39 +157,36 @@ already runs the city.
 
 ## Run it
 
-```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+Everything runs through one script, [`run.sh`](run.sh), with one subcommand
+per stage of the platform. Run `./run.sh` with no argument to list them.
 
-# 1. ingest: live collectors (leave running) + batch sources (once)
-PYTHONPATH=src .venv/bin/python -m smartcity.ingest.runner --loop 60
-PYTHONPATH=src .venv/bin/python -m smartcity.ingest.traffic --hours 168
-PYTHONPATH=src .venv/bin/python -m smartcity.ingest.dvf
-PYTHONPATH=src .venv/bin/python -m smartcity.ingest.amenities
+| Command | What it does |
+|---|---|
+| `./run.sh setup` | creates `.venv` and installs the Python dependencies |
+| `./run.sh ingest` | lands every source once in `bronze/`: a snapshot of the live feeds, 7 days of road traffic, DVF sales, OSM amenities |
+| `./run.sh collect` | keeps the live collectors running (Vélib' docks, air quality, traffic), polling every 60 s |
+| `./run.sh pipeline` | PySpark medallion: bronze → silver → gold, including the geospatial joins |
+| `./run.sh ontology` | hydrates the city ontology from gold and exports it to JSON-LD |
+| `./run.sh valuation` | trains the valuation model, then values the property inventory |
+| `./run.sh chain` | compiles the contracts, starts a local Anvil chain, deploys, tokenizes the top-graded properties, seeds the market, indexes chain state back into the ontology, then stops Anvil (its state is saved to `data/chain/anvil-state.json`) |
+| `./run.sh all` | the full build: ingest → pipeline → ontology → valuation → chain |
+| `./run.sh dashboard` | the Reflex dashboard in dev mode on http://localhost:3000 |
+| `./run.sh public` | the public demo (below) |
 
-# 2. PySpark pipeline
-PYTHONPATH=src .venv/bin/python -m smartcity.pipeline.bronze_to_silver
-PYTHONPATH=src .venv/bin/python -m smartcity.pipeline.silver_to_gold
+A first run is `./run.sh setup && ./run.sh all && ./run.sh dashboard`.
+It needs Python 3.13 (tested), Java 17 for Spark, and [Foundry](https://getfoundry.sh)
+(`forge`, `anvil`) for the `chain` stage. All sources are free and keyless.
 
-# 3. ontology + standards export
-PYTHONPATH=src .venv/bin/python -m smartcity.ontology.build
-PYTHONPATH=src .venv/bin/python -m smartcity.ontology.export_jsonld
+### Public demo
 
-# 4. valuation: train, then build the valued inventory
-PYTHONPATH=src .venv/bin/python -m smartcity.valuation.train
-PYTHONPATH=src .venv/bin/python -m smartcity.valuation.listings
-
-# 5. tokenization (needs Foundry: https://getfoundry.sh)
-(cd chain && forge build)                                        # compile contracts
-anvil --state data/chain/anvil-state.json --chain-id 31337 &     # local chain
-PYTHONPATH=src .venv/bin/python -m smartcity.tokenization.deploy
-PYTHONPATH=src .venv/bin/python -m smartcity.tokenization.tokenize --grades A B --limit 24
-PYTHONPATH=src .venv/bin/python -m smartcity.tokenization.market --seed
-PYTHONPATH=src .venv/bin/python -m smartcity.tokenization.index
-PYTHONPATH=src .venv/bin/python -m smartcity.ontology.build      # chain state -> ontology
-
-# 6. dashboard
-cd dashboard && ../.venv/bin/reflex run        # http://localhost:3000
-```
+`./run.sh public` (i.e. [`dashboard/serve_public.sh`](dashboard/serve_public.sh))
+serves a production build through **Tailscale Funnel**: Tailscale publishes
+`https://<machine>.<tailnet>.ts.net:8443` and proxies it to the app on local
+port 3057, so no firewall port is opened. The frontend and the websocket
+backend share that one port. `./run.sh public local` runs the same build on
+http://localhost:3057 without publishing it, and `./run.sh public off` stops
+sharing. One-time setup: `sudo tailscale set --operator=$USER`, and Funnel
+enabled for the tailnet (the first run prints the admin-console link).
 
 ## Layout
 
@@ -197,9 +196,13 @@ src/smartcity/ingest/        pollers + batch ingests → bronze (append-only)
 src/smartcity/pipeline/      PySpark: bronze → silver → gold (incl. geospatial joins)
 src/smartcity/ontology/      schema.yml, hydration, query API, JSON-LD export
 src/smartcity/valuation/     feature contract, swappable models, listings & appraisals
+src/smartcity/tokenization/  deploy, tokenize, market seeding, chain indexer
 src/smartcity/catalog.py     data catalog: provenance, coverage, per-record access
-dashboard/                   Reflex app: properties · data sources · ontology · appraise
-data/                        bronze/ silver/ gold/ ontology/ valuation/ (generated)
+chain/contracts/             Solidity: PropertyDeed, PropertyShares, AppraisalOracle, Marketplace, EurStable
+dashboard/                   Reflex app: doc · properties · tokens · data sources · ontology · appraise
+dashboard/serve_public.sh    public demo through Tailscale Funnel
+run.sh                       one entry point for every stage
+data/                        bronze/ silver/ gold/ ontology/ valuation/ chain/ (generated)
 ```
 
 Sources: [Paris road counters](https://opendata.paris.fr/explore/dataset/comptages-routiers-permanents/) ·

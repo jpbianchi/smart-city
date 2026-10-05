@@ -1,6 +1,7 @@
 """CityPulse — live smart-city dashboard over the ontology.
 
 Run from the dashboard/ directory:  reflex run
+Page /doc        about the project: smart-city and tokenization story, page guide
 Page /           properties: valued inventory, map, sortable table, detail popup
 Page /sources    data-source catalog: provenance, coverage, per-sensor drill-down
 Page /ontology   ontology explorer: schema, zone traversals, entity lookup
@@ -361,7 +362,7 @@ def appraise_page() -> rx.Component:
     )
 
 
-from citypulse import properties, sources_page, tokens  # noqa: E402,F401  (register pages)
+from citypulse import doc_page, properties, sources_page, tokens  # noqa: E402,F401  (register pages)
 
 app = rx.App(
     style={"font_family": 'system-ui, -apple-system, "Segoe UI", sans-serif', "background": PAGE_BG},
