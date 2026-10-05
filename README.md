@@ -188,6 +188,12 @@ http://localhost:3057 without publishing it, and `./run.sh public off` stops
 sharing. One-time setup: `sudo tailscale set --operator=$USER`, and Funnel
 enabled for the tailnet (the first run prints the admin-console link).
 
+To keep the demo up without a terminal, [`dashboard/citypulse.service`](dashboard/citypulse.service)
+runs the same script as a systemd user service: it restarts on crash and,
+with lingering enabled, starts at boot. Install steps are in the file's
+header; logs with `journalctl --user -u citypulse -f`. The app only listens
+on 127.0.0.1, so Funnel is the only way in.
+
 ## Layout
 
 ```

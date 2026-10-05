@@ -31,7 +31,7 @@ fi
 
 if [[ "${1:-}" == "local" ]]; then
     export REFLEX_API_URL="http://localhost:${PORT}"
-    exec ../.venv/bin/reflex run --env prod --single-port --backend-port "$PORT"
+    exec ../.venv/bin/reflex run --env prod --single-port --backend-host 127.0.0.1 --backend-port "$PORT"
 fi
 
 # Public URL of this node, e.g. https://myhost.tail1234.ts.net
@@ -45,4 +45,4 @@ export REFLEX_DEPLOY_URL="$PUBLIC_URL"
 tailscale funnel --bg --https="$PUBLIC_PORT" "$PORT"
 echo "Public URL: $PUBLIC_URL"
 
-exec ../.venv/bin/reflex run --env prod --single-port --backend-port "$PORT"
+exec ../.venv/bin/reflex run --env prod --single-port --backend-host 127.0.0.1 --backend-port "$PORT"

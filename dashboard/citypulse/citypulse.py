@@ -12,6 +12,7 @@ from __future__ import annotations
 import pandas as pd
 import plotly.graph_objects as go
 import reflex as rx
+from granian.utils.proxies import wrap_asgi_with_proxy_headers
 
 from citypulse import charts
 from citypulse.data import eaqi_band, load_market, load_snapshot
@@ -367,4 +368,7 @@ from citypulse import doc_page, properties, sources_page, tokens  # noqa: E402,F
 app = rx.App(
     style={"font_family": 'system-ui, -apple-system, "Segoe UI", sans-serif', "background": PAGE_BG},
     stylesheets=["/styles.css"],
+    # Behind Tailscale Funnel the app sees plain http from 127.0.0.1; trust its
+    # X-Forwarded-Proto so redirects (e.g. /doc -> /doc/) keep the https scheme.
+    api_transformer=wrap_asgi_with_proxy_headers,
 )

@@ -1,0 +1,25 @@
+# systemd user service: the public CityPulse demo (dashboard/serve_public.sh).
+#
+# Install (once):
+#   sudo loginctl enable-linger $USER          # start at boot, without a login session
+#   systemctl --user link "$PWD/dashboard/citypulse.service"
+#   systemctl --user enable --now citypulse
+# Logs:    journalctl --user -u citypulse -f
+# Restart: systemctl --user restart citypulse  (after pulling changes; it rebuilds)
+[Unit]
+Description=CityPulse dashboard, public through Tailscale Funnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+WorkingDirectory=%h/PROJECTS/SMART_CITY/dashboard
+ExecStart=%h/PROJECTS/SMART_CITY/dashboard/serve_public.sh
+Environment=PATH=%h/.nvm/versions/node/v22.23.2/bin:%h/.local/share/reflex/bun/bin:%h/PROJECTS/SMART_CITY/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=300
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
