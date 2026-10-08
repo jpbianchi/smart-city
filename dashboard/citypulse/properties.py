@@ -554,7 +554,15 @@ def listings_table() -> rx.Component:
     return panel(
         rx.hstack(
             rx.text("Property valuations", size="3", weight="bold", color=INK),
-            rx.text("click a column to sort · click a row for the full dossier", size="1", color=MUTED),
+            rx.hstack(
+                rx.icon("mouse-pointer-click", size=16, color=RED),
+                rx.text("Click any row for the full valuation dossier",
+                        size="2", weight="bold", color=RED),
+                align="center", spacing="2",
+                background_color=f"{RED}14", border=f"1px solid {RED}55",
+                border_radius="999px", padding="5px 12px",
+            ),
+            rx.text("click a column header to sort", size="1", color=MUTED),
             rx.spacer(),
             rx.text(S.range_text, size="1", color=INK_2),
             rx.button("‹ Prev", on_click=S.prev_page, size="1", variant="soft", disabled=~S.has_prev),
